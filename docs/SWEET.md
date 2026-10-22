@@ -120,6 +120,27 @@ an available linked kernel does not make a failed CI build a success. Evidence
 contains logs, source/compiler IDs and any linked kernel, never Apple images.
 No completed new kernel build result is claimed at this point.
 
+The first dispatched job `39828398981` fetched SDK/cctools and applied XNU,
+then failed at host-tool compilation because Ubuntu lacked `uuid/uuid.h`.
+Added `uuid-dev`; this is a dependency fix, not a completed kernel build.
+
+## Preventing redwood hardware sequences on sweet
+
+The loader now emits `/chosen/hackios-platform` from its selected hardware
+profile (separate from Apple's userland device identity). GPU, Wi-Fi and ADSP
+initialization require exact `redwood` plus the existing peripheral-base check.
+The GPU guard also covers `adreno=N` and `display_probe`, previously able to
+bypass automatic-start checks. The radio's Linux-KPI-without-radio experiment
+is confined to `qemu-virt`. Old loaders missing this property leave these
+drivers disabled: use a matching new loader with a rebuilt kernel.
+
+Thirteen identity assertions pass as C11 and C++14 on Windows, including absent,
+NULL, truncated, non-NUL-terminated and wrong-board properties. The new loader
+compiled with warnings as errors, SHA-256
+`3da5dc9b8f37ad225fde299c1d35bf2b966fa2c99157f8343e23f3da76412bcf`.
+This isolates three inherited hardware paths; it does not implement sweet's
+A618/WCN3990/PM6150 startup or certify other inherited drivers for sweet.
+
 The original ios-sweet 0088 kernel CI run `39812559222` ended without running
 build steps: GitHub annotations say the hosted runner could not acquire the
 job and cite macOS ARM64 capacity constraints. This is not a successful build

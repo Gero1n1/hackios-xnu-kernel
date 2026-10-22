@@ -24,7 +24,13 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld flex bison m4 perl autoconf automake libtool-bin libxml2-dev libncurses-dev zlib1g-dev
+          sudo apt-get install -y clang lld flex bison m4 perl autoconf automake libtool-bin libxml2-dev libncurses-dev zlib1g-dev uuid-dev
+      - name: Check board identity matching (C and C++)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/platform-test/test.c -o /tmp/platform-c
+          /tmp/platform-c
+          c++ -std=c++14 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/platform-test/test.c -o /tmp/platform-cpp
+          /tmp/platform-cpp
       - name: Fetch pinned SDK and cross tools
         run: bash tools/ci/setup-linux.sh
       - name: Apply sources and build dependencies

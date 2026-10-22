@@ -3053,6 +3053,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	dt_begin(&w, "chosen");
+	dt_prop_str(&w, "hackios-platform", plat->name);
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);

@@ -97,6 +97,7 @@
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/hackios_platform.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -3992,7 +3993,7 @@ start_by_itself(void)
 	const char *missing = NULL;
 	uint64_t size;
 
-	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
+	if (!hackios_platform_is("redwood") || pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
 		printf("adreno: THE GPU IS NOT STARTED: gpu=1 is for the phone, and this is not it\n");
 		return false;
 	}
@@ -4028,6 +4029,16 @@ redwood_adreno_init(void)
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
 
+	/* Cover diagnostic steps and display_probe too: both access redwood's
+	 * registers even when automatic gpu=1 startup was not requested. */
+	if (!hackios_platform_is("redwood") || pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
+		if ((PE_parse_boot_argn("gpu", &only, sizeof(only)) && only) ||
+		    (PE_parse_boot_argn("adreno", &only, sizeof(only)) && only) ||
+		    (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only)) {
+			printf("adreno: board profile does not match redwood; no GPU/display registers accessed\n");
+		}
+		return;
+	}
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
 		display_probe();
 	}
