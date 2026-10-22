@@ -3872,7 +3872,7 @@ ramfb_phone_screen(void)
 		uint64_t addr;
 		uint32_t fourcc, flags, width, height, stride;
 	} __attribute__((packed)) cfg;
-	static struct {
+	static volatile struct {
 		uint32_t control, length;
 		uint64_t address;
 	} dma;
@@ -3906,7 +3906,19 @@ ramfb_phone_screen(void)
 	dma.control = be32(select << 16 | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
 	dma.length = be32(sizeof(cfg));
 	dma.address = __builtin_bswap64((uint64_t)(uintptr_t)&cfg);
+	/* The device reads this descriptor and clears control through DMA. Make
+	 * stores visible before the doorbell and reload its completion, rather
+	 * than letting the compiler reuse the value we just stored. */
+	__asm__ volatile("dsb sy" ::: "memory");
 	*(volatile uint64_t *)(FW_CFG_BASE + 16) = __builtin_bswap64((uint64_t)(uintptr_t)&dma);
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (unsigned tries = 0; tries < 100000; tries++) {
+		uint32_t control = be32(dma.control);
+		if (control == 0 || (control & 1) != 0) {
+			break;
+		}
+		__asm__ volatile("yield" ::: "memory");
+	}
 	if (dma.control != 0) {
 		print("ramfb: control %x after the request\n", (uint64_t)be32(dma.control));
 		return;

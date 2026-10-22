@@ -1,5 +1,13 @@
 # HackiOS — XNU kernel
 
+## sweet development branch
+
+This branch starts the Redmi Note 10 Pro / SM7150 adaptation. Current local
+Windows checks and remaining work are recorded in [docs/SWEET.md](docs/SWEET.md).
+The upstream phone results below concern **redwood**. Native A618 graphics,
+WCN3990 Wi-Fi, charging and panel 120 Hz on sweet remain unverified.
+The Windows image recipe currently targets QEMU; it is not a phone installer.
+
 **HackiOS** boots Apple's open-source **XNU kernel** (`xnu-8796.121.2`, the kernel of iOS 16.5) on Android phone
 hardware and runs the **unmodified iOS 16.5 user space** on top of it: launchd → backboardd → SpringBoard →
 apps. Our own EFI loader, our own replacements for Apple's closed drivers, a UEFI port, and a Linux Wi-Fi driver

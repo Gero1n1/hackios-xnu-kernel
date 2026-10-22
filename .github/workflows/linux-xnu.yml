@@ -1,0 +1,57 @@
+name: Linux XNU source build
+on:
+  workflow_dispatch:
+  push:
+    branches: [sweet-port]
+    paths:
+      - '.github/workflows/linux-xnu.yml'
+      - 'tools/ci/**'
+      - 'xnu/**'
+      - 'xnu-deps/**'
+      - 'xnu-build.sh'
+      - 'xnu-env.sh'
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      THEOS: ${{ runner.temp }}/theos
+      JOBS: '4'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld flex bison m4 perl autoconf automake libtool-bin libxml2-dev libncurses-dev zlib1g-dev
+      - name: Fetch pinned SDK and cross tools
+        run: bash tools/ci/setup-linux.sh
+      - name: Apply sources and build dependencies
+        run: |
+          bash xnu-deps/setup.sh --stage1
+          bash xnu/apply.sh
+          bash xnu-deps/setup.sh --stage2
+      - name: Build XNU (preserve the actual make result)
+        run: |
+          set -o pipefail
+          mkdir -p ci-results
+          ./xnu-build.sh -j4 -k 2>&1 | tee ci-results/kernel-build.log
+      - name: Collect available build evidence
+        if: always()
+        run: |
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/source-commit.txt
+          clang --version > ci-results/compiler.txt
+          find xnu-deps -maxdepth 1 -name '*.log' -exec cp '{}' ci-results/ \;
+          kernel=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          if test -s "$kernel"; then
+            cp "$kernel" ci-results/
+            sha256sum "$kernel" > ci-results/kernel.sha256
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: linux-xnu-evidence
+          path: ci-results/
+          retention-days: 7
