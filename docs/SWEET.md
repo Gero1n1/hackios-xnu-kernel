@@ -104,8 +104,12 @@ Repeated lsd CPU-monitor entitlement warnings have not been proven causal;
 the genuine executable does not have the override entitlement. No workaround
 granting permissions or disabling CPU monitoring has been added.
 
-The second run `E:/hackios-qemu-ios165-2` is in progress with 4 CPUs and 1200
-seconds. It reports four processors running. Current runner stores native PNG
+The second run `E:/hackios-qemu-ios165-2` was interrupted on 22 October before
+its final report; it is not a completed 1200-second run. It reports four
+processors running and records SpringBoard stacks at guest uptime 123.590
+and 447.241 seconds, lsd at 651.347 seconds. The main SpringBoard chain is
+unchanged across those two samples. The final captured screen is the Apple
+logo, not a lock-screen pass. Current runner stores native PNG
 snapshots and all-CPU registers, distinguishes host termination from guest exit,
 and offers a separate local QMP control port (`--control-port 4446`). QMP input
 has successfully requested live SpringBoard stacks and per-process CPU usage.
@@ -123,6 +127,12 @@ No completed new kernel build result is claimed at this point.
 The first dispatched job `39828398981` fetched SDK/cctools and applied XNU,
 then failed at host-tool compilation because Ubuntu lacked `uuid/uuid.h`.
 Added `uuid-dev`; this is a dependency fix, not a completed kernel build.
+Run `39828874995` subsequently compiled and linked
+`mach.development.bcm2837.unstripped`, including the new board-identity guards.
+It then failed before final kernel publication: `dsymutil` was missing,
+leaving `--minimize: command not found`. Added the Ubuntu `llvm` package and
+an explicit tool-presence check. Logs downloaded to
+`host-tools/ci-39828874995/`; this run is a failed build, not a tested kernel.
 
 ## Preventing redwood hardware sequences on sweet
 

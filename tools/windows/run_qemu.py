@@ -135,6 +135,8 @@ def main():
     parser.add_argument('--vars', type=Path, required=True)
     parser.add_argument('--ramdisk', type=Path, required=True)
     parser.add_argument('--loader', type=Path, default=ROOT / 'prebuilt/loader.efi')
+    parser.add_argument('--kernel', type=Path, default=ROOT / 'prebuilt/mach.development.bcm2837',
+                        help='explicit rebuilt kernel, otherwise upstream prebuilt')
     parser.add_argument('--system', type=Path)
     parser.add_argument('--network', action='store_true', help='QEMU NAT + emulated virtio-net (not phone Wi-Fi)')
     parser.add_argument('--control-port', type=int, default=0, help='optional second loopback QMP monitor')
@@ -147,7 +149,7 @@ def main():
         parser.error('seconds must be 15..1800')
     if args.control_port and not 1024 <= args.control_port <= 65535:
         parser.error('control-port must be 1024..65535')
-    for name in ('qemu', 'efi', 'vars', 'ramdisk', 'system', 'loader'):
+    for name in ('qemu', 'efi', 'vars', 'ramdisk', 'system', 'loader', 'kernel'):
         path = getattr(args, name)
         if path:
             path = path.resolve(strict=True)
@@ -165,7 +167,7 @@ def main():
     efi_boot.mkdir(parents=True)
     shutil.copyfile(args.loader, efi_boot / 'BOOTAA64.EFI')
     shutil.copyfile(args.vars, output / 'vars.fd')
-    kernel = ROOT / 'prebuilt/mach.development.bcm2837'
+    kernel = args.kernel
     payload = [sys.executable, str(ROOT / 'xnuloader/mkpayload.py'), '-o',
                str(output / 'payload.bin'), f'kernel={kernel}', f'ramdisk={args.ramdisk}',
                '--cmdline', f'loader_return_after={args.seconds} epoch={int(time.time())} '
