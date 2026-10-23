@@ -7,6 +7,9 @@ Windows checks and remaining work are recorded in [docs/SWEET.md](docs/SWEET.md)
 The upstream phone results below concern **redwood**. Native A618 graphics,
 WCN3990 Wi-Fi, charging and panel 120 Hz on sweet remain unverified.
 The Windows image recipe currently targets QEMU; it is not a phone installer.
+Linux source builds and host checks pass. Full iOS userland reaches system
+services in QEMU, but a lock screen is not confirmed and an SMP panic remains
+under investigation. Windows RAM streaming avoids a second multi-GB ROM copy.
 
 **HackiOS** boots Apple's open-source **XNU kernel** (`xnu-8796.121.2`, the kernel of iOS 16.5) on Android phone
 hardware and runs the **unmodified iOS 16.5 user space** on top of it: launchd → backboardd → SpringBoard →

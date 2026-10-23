@@ -1,4 +1,11 @@
-# sweet migration status — 2026-10-22
+# sweet migration status — 2026-10-23
+
+Latest source milestone: `fd68e441f756e9614aef905a336c2948d278865f`.
+Full XNU CI and 34 Python tests on Windows/Ubuntu pass. QEMU run 5 completed
+600 guest seconds with a normal loader return and no observed panic, but
+only Apple's logo is confirmed. The four-CPU scheduler panic remains open.
+No native sweet hardware feature is newly claimed. Read the final sections
+below for current hashes, run IDs and the next concrete actions.
 
 Active worktree: `E:/hackios-sweet`, kernel branch `sweet-port`. Original
 `E:/порт/ios-sweet` is preserved, including its local commits and driver work.
@@ -224,6 +231,46 @@ rejected too. C11/C++14 fixtures cover truncation, alignment, address wrap,
 TCM boundaries, metadata and a bounded malformed corpus. CI additionally runs
 AddressSanitizer/UBSan and rebuilds the kernel. These are block-format checks;
 A618's flat ITCM firmware still requires its separate startup implementation.
+
+Full XNU build with these GMU checks succeeded in run `39900702926` at
+`fd68e441f756e9614aef905a336c2948d278865f`: final kernel 15,144,488 bytes,
+SHA-256 `a04755089dca3cbf91af5c793a631cb5af5aa6aa7cd4fb34c055d7e75762bb48`.
+Downloaded/verified in `host-tools/ci-39900702926/`; this latest binary has not
+yet been booted. Both host workflow runs `39900707736` / `39900703070` passed;
+each has Windows and Ubuntu jobs with all 34 Python tests passing, no skips.
+Ubuntu additionally passed native C/C++ and AddressSanitizer/UBSan GMU tests.
+The GMU fixture also passed Windows Zig UBSan locally, exit 0, no diagnostics.
+
+## Current handoff after run 5
+
+Run 5 finished in 906.81 host seconds: 265.86 seconds through streamed preload
+and kernel start, then the requested 600-second guest session and host cleanup.
+Loader returned, no early exception/panic marker, no log-limit hit; initial
+36 and IOSurface 80 checks passed. QEMU was deliberately terminated afterward
+at its host deadline (exit 1); this is not a guest crash. Screen remains at
+Apple's logo, so a lock-screen/home-screen result is not claimed.
+
+Targeted logs show lsd successfully creating application containers, with
+UNSUPPORTED errors for data-protection operations. At guest uptime 474.974,
+SpringBoard still waited for LaunchServices; lsd had running registration
+threads at 475.307. Use `rg -a` on this log because some Apple os_log output
+contains NUL bytes. Do not infer a permanent container/logging deadlock from
+an early sample, and do not hide unsupported data protection with fake success.
+
+Next: investigate initial LaunchServices registration to reach the real UI.
+A longer bounded single-CPU run or an explicitly labelled diagnostic
+comparison of on-demand job policies can distinguish slow initial reseeding
+from a dependency that never finishes. Keep the normal recipe's services
+intact and do not call a reduced diagnostic image a usable system. Separately,
+reproduce/symbolicate the four-CPU `pset0 + 0x100` ticket-lock panic; host
+descheduling remains only a hypothesis. Native A618/WCN3990/charging/panel
+work still requires target-specific implementation and future sweet checks.
+
+Rechecked both upstream main refs on 23 October: kernel remains `8e61187`,
+userland `906425b`; no unseen upstream update was incorporated or assumed.
+App heartbeat `ios-sweet` is ACTIVE, configured for four hourly continuations
+of this same thread. Inspect/update it rather than creating another one.
+No phone action is permitted by the saved continuation prompt.
 
 Draft review branches: kernel <https://github.com/Gero1n1/hackios-xnu-kernel/pull/1>,
 userland <https://github.com/Gero1n1/hackios-xnu-userland/pull/1>.
