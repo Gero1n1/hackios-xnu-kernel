@@ -134,6 +134,38 @@ leaving `--minimize: command not found`. Added the Ubuntu `llvm` package and
 an explicit tool-presence check. Logs downloaded to
 `host-tools/ci-39828874995/`; this run is a failed build, not a tested kernel.
 
+Run `39897654980` produced a final 15,160,872-byte ARM64 kernel, SHA-256
+`b7dab25a7bde08a5e2344c9a995f5a43230065629538b7acf5b4126d43c2b3ff`,
+at source `76735ab`. Make then failed its symbol-set checks: the generic port
+advertised unavailable generated DriverKit RPC and Apple PPL/DART interfaces.
+The earlier upstream claim that all failures were DriverKit-only is inaccurate.
+An explicit source patch removes 131 unavailable export entries (89 IOKit,
+2 Libkern, 35 Private.arm64, 5 Private); it adds no success-returning stubs and
+does not disable export/symbol-set checking. Applied/reversed cleanly against
+Apple `c54f35ca767986246321eb901baf8f5ff7923f6a`. This is the generic port's
+supported KPI list, not a patch intended for an actual Apple hardware build.
+The new full CI result is still pending.
+
+## 23 October: boot wait chain
+
+Downloaded/extracted the 591,855,616-byte shared-cache symbol member from the
+same CRC-verified iOS 16.5 OS DMG; symbols SHA-256
+`791bcbc49a7d175d5625f927f0157cece242aeb46d53da0f22f8c7a1aa17bf51`.
+Only the verified temporary DMG was deleted afterward. Resolved 72 addresses
+from run 2 using ipsw 3.1.739. SpringBoard waits in LaunchServices database
+initialization; another SpringBoard thread waits for database reseeding via
+XPC; one lsd thread waits for a container query. These are observed stacks,
+not proof that the lsd CPU-monitor warning is the cause.
+
+Run 3 (`E:/hackios-qemu-ios165-3`) uses the newly built kernel and matching
+`loader-platform.efi`; it has reached Apple launchd. A live container-manager
+sample at uptime 92.911 seconds waits for log preferences through firehose;
+at 221.934 seconds that process has progressed to 5 threads. Therefore that
+first logging wait is not established as a permanent deadlock. The full run
+and lock-screen result are still pending. Board-identity C tests also pass
+under Zig's undefined-behavior sanitizer, exit 0 with no diagnostics; all 22
+Python host tests passed again on 23 October.
+
 ## Preventing redwood hardware sequences on sweet
 
 The loader now emits `/chosen/hackios-platform` from its selected hardware
