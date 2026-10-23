@@ -183,6 +183,51 @@ Host descheduling/page pressure is a hypothesis, not an established cause.
 The 4-MiB diagnostic image `windows-qemu-diag-1/root.apfs` has been built and
 its selected job OS_ACTIVITY_DT_MODE settings read back from APFS.
 
+## Passing source build and bounded Windows RAM streaming
+
+Full source-build run `39899318652` **succeeded**, including symbol-set/export
+checks, at `6a4a8138ac960da03d0f2c5880c79c552b95e7eb`. Downloaded final kernel:
+15,144,488 bytes, SHA-256
+`9f6e2885399619977b37c2d1ad1ce0872077e06df6b7e7d2aa946ef9a3cafef7`.
+This is compilation/link/validation evidence, not a sweet hardware result.
+
+Run 4 could not start the guest: Windows QEMU's raw loader requested an extra
+4,294,967,296 bytes to read the 2.49-GB image and failed allocation. Exit 1,
+42.97 host seconds; no guest checks ran. The new default streams the image
+through QEMU's loopback-only GDB physical-memory mode while CPUs are paused,
+then checks the streamed SHA-256 and three RAM samples before detaching.
+The old ROM-copy path remains an explicit `--system-transfer loader` fallback.
+No raw backing-file duplicate is made. Startup has a separate bounded budget;
+progress.json remains explicitly incomplete while loading/running.
+
+Actual 1-MiB RAM smoke: 0.094 seconds, exact input hash and 3 readbacks, 64-MiB
+test VM. Full run 5 (`E:/hackios-qemu-ios165-5`) subsequently transferred all
+2,492,203,008 bytes, SHA-256
+`855e2372d171a80bdb19dfe35925f7a4bc7bae04b94304a2956b8f944afe78b1`,
+and passed all 3 RAM samples. The kernel started at 265.86 host seconds. It
+uses 1 CPU, the passing CI kernel above, and the targeted diagnostic boot
+image; final runtime/lock-screen result is still pending. This is a diagnostic
+configuration change, not proof that one variable caused previous failures.
+
+Current Python host tests: 30 Windows-adapter tests plus 2 mkjobs and 2 APFS
+regressions. The new workflow checks them on Ubuntu and Windows with the
+source-only userland companion pinned at `7c73287`. No Apple image is used.
+
+## GPU firmware bounds
+
+The inherited block-format GMU loader accepted incomplete final headers,
+ignored non-word-aligned tail bytes, used wrapping 32-bit payload ends and
+treated endpoints in different TCM regions as one valid MMIO range. Added
+full-input validation before allocation/upload and same-region containment.
+Malformed input is rejected; zero-size/excess/wrapping memory requests are
+rejected too. C11/C++14 fixtures cover truncation, alignment, address wrap,
+TCM boundaries, metadata and a bounded malformed corpus. CI additionally runs
+AddressSanitizer/UBSan and rebuilds the kernel. These are block-format checks;
+A618's flat ITCM firmware still requires its separate startup implementation.
+
+Draft review branches: kernel <https://github.com/Gero1n1/hackios-xnu-kernel/pull/1>,
+userland <https://github.com/Gero1n1/hackios-xnu-userland/pull/1>.
+
 ## Preventing redwood hardware sequences on sweet
 
 The loader now emits `/chosen/hackios-platform` from its selected hardware

@@ -48,6 +48,19 @@ class QemuTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'fit guest RAM'):
                 command(args, Path(tmp), 4445)
 
+    def test_streaming_pauses_cpu_and_avoids_system_rom_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'system.apfs'
+            path.write_bytes(b'fixture')
+            args = self.args(system=path)
+            args.system_transfer = 'gdb'
+            with self.assertRaisesRegex(ValueError, 'separate GDB port'):
+                command(args, Path(tmp), 4445)
+            cmd = command(args, Path(tmp), 4445, 4447)
+            self.assertIn('-S', cmd)
+            self.assertEqual(cmd[cmd.index('-gdb')+1], 'tcp:127.0.0.1:4447')
+            self.assertFalse(any('loader,file=' + path.as_posix() in s for s in cmd))
+
     def test_snapshots_preserve_pixels_and_all_cpu_registers(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)

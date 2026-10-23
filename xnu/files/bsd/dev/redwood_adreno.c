@@ -98,6 +98,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
 #include <sys/hackios_platform.h>
+#include <sys/adreno_gmu_firmware.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -1746,7 +1747,9 @@ step_gmu_space(void)
 	}
 	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
 	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
-	if (gmu_firmware == NULL) {
+	if (!adreno_gmu_blocks_valid(gmu_firmware, gmu_firmware_size,
+	    GMU_ITCM_ADDRESS, GMU_DTCM_ADDRESS, GMU_TCM_SIZE)) {
+		printf("adreno: %u: missing or invalid block-format GMU firmware\n", step);
 		return false;
 	}
 	for (uint64_t at = 0; at + sizeof(struct gmu_firmware_block) <= gmu_firmware_size;) {
@@ -1763,7 +1766,8 @@ step_gmu_space(void)
 			continue;
 		}
 		if (gmu_block_count == sizeof(gmu_blocks) / sizeof(gmu_blocks[0]) || (block.address & 4095) ||
-		    block.value > 0x100000 || !block_new(&gmu_space, &gmu_blocks[gmu_block_count++], block.address, block.value,
+		    block.value == 0 || block.value > 0x100000 || (uint64_t)block.address + block.value > UINT64_C(0x100000000) ||
+		    !block_new(&gmu_space, &gmu_blocks[gmu_block_count++], block.address, block.value,
 		    PTE_GMU)) {
 			printf("adreno: %u: cannot make %#x bytes at %#x for the firmware\n", step, block.value, block.address);
 			return false;
@@ -1792,7 +1796,8 @@ step_gmu_firmware(void)
 {
 	uint32_t wrong = 0;
 
-	if (!cx_ready() || gmu_firmware == NULL) {
+	if (!cx_ready() || !adreno_gmu_blocks_valid(gmu_firmware, gmu_firmware_size,
+	    GMU_ITCM_ADDRESS, GMU_DTCM_ADDRESS, GMU_TCM_SIZE)) {
 		return false;
 	}
 	announce("load the GMU's firmware: its first 16K of code and of data through the GMU's registers (0x3d6d000, "
@@ -1808,7 +1813,8 @@ step_gmu_firmware(void)
 			if (block.size == 0) {
 				continue;
 			}
-			if (in_tcm(block.address) && in_tcm(block.address + block.size - 1)) {
+			if (adreno_gmu_range_inside(block.address, block.size, GMU_ITCM_ADDRESS, GMU_TCM_SIZE) ||
+			    adreno_gmu_range_inside(block.address, block.size, GMU_DTCM_ADDRESS, GMU_TCM_SIZE)) {
 				uint32_t registers = block.address < GMU_DTCM_ADDRESS ? GMU_ITCM + block.address - GMU_ITCM_ADDRESS :
 				    GMU_DTCM + block.address - GMU_DTCM_ADDRESS;
 
@@ -1835,7 +1841,7 @@ step_gmu_firmware(void)
 					return false;
 				}
 				if (block.address >= gmu_blocks[i].address &&
-				    block.address + block.size <= gmu_blocks[i].address + gmu_blocks[i].size) {
+				    (uint64_t)block.address + block.size <= gmu_blocks[i].address + gmu_blocks[i].size) {
 					memcpy((void *)(gmu_blocks[i].memory + (block.address - gmu_blocks[i].address)), data, block.size);
 					to_memory(gmu_blocks[i].memory, gmu_blocks[i].size);
 					printf("adreno: %u: %#x bytes at the GMU's %#x, in memory\n", step, block.size, block.address);

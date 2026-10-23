@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import time
+from gdb_memory import GDBMemory
 
 ROOT = Path(__file__).resolve().parents[2]
 RD_ADDR = 0xFC000000
@@ -107,7 +108,7 @@ def guest_started(path):
         return b'Darwin Kernel Version ' in stream.read(64 << 10)
 
 
-def command(args, output, port):
+def command(args, output, port, gdb_port=None):
     cmd = [str(args.qemu), '-M', 'virt,gic-version=3', '-cpu', 'cortex-a76',
            '-smp', str(args.cpus), '-m', f'{args.memory_gib}G',
            '-accel', 'tcg,tb-size=192', '-L', str(args.efi.parent),
@@ -129,8 +130,13 @@ def command(args, output, port):
     if args.system:
         if RD_ADDR + args.system.stat().st_size > 0x40000000 + (args.memory_gib << 30):
             raise ValueError('system image does not fit guest RAM')
-        # Windows QEMU lacks memory-backend-file: preload directly, no 12 GiB backing file.
-        cmd += ['-device', f'loader,file={args.system.as_posix()},addr={RD_ADDR:#x},force-raw=on']
+        if getattr(args, 'system_transfer', 'loader') == 'gdb':
+            if gdb_port is None:
+                raise ValueError('RAM streaming requires a separate GDB port')
+            cmd += ['-S', '-gdb', f'tcp:127.0.0.1:{gdb_port}']
+        else:
+            # Diagnostic fallback: Windows raw loader keeps another multi-GiB ROM copy.
+            cmd += ['-device', f'loader,file={args.system.as_posix()},addr={RD_ADDR:#x},force-raw=on']
     return cmd
 
 
@@ -144,11 +150,13 @@ def main():
     parser.add_argument('--kernel', type=Path, default=ROOT / 'prebuilt/mach.development.bcm2837',
                         help='explicit rebuilt kernel, otherwise upstream prebuilt')
     parser.add_argument('--system', type=Path)
+    parser.add_argument('--system-transfer', choices=('gdb', 'loader'), default='gdb',
+                        help='stream to paused guest RAM (default), or use the memory-heavy raw loader')
     parser.add_argument('--network', action='store_true', help='QEMU NAT + emulated virtio-net (not phone Wi-Fi)')
     parser.add_argument('--control-port', type=int, default=0, help='optional second loopback QMP monitor')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--seconds', type=int, default=120)
-    parser.add_argument('--startup-seconds', type=int, default=240,
+    parser.add_argument('--startup-seconds', type=int, default=600,
                         help='separate bound for RAM preload/UEFI before the kernel starts')
     parser.add_argument('--cpus', type=int, default=1, choices=range(1, 5))
     parser.add_argument('--memory-gib', type=int, default=7, choices=range(5, 9))
@@ -189,7 +197,15 @@ def main():
               for name, path in dict(kernel=kernel, loader=args.loader,
                                     ramdisk=args.ramdisk, system=args.system,
                                     firmware=args.efi, variables=args.vars).items() if path}
-    cmd = command(args, output, free_port())
+    port = free_port()
+    while port == args.control_port:
+        port = free_port()
+    gdb_port = None
+    if args.system and args.system_transfer == 'gdb':
+        gdb_port = free_port()
+        while gdb_port in (port, args.control_port):
+            gdb_port = free_port()
+    cmd = command(args, output, port, gdb_port)
     (output / 'command.json').write_text(json.dumps(dict(argv=cmd, inputs=inputs), indent=2))
     result = dict(mode='full_ios_attempt' if args.system else 'static_pid1_only',
                   status='started', screenshot=False, log_limit=False,
@@ -203,7 +219,27 @@ def main():
         with (output / 'console.log').open('wb') as log:
             process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            port = int(cmd[cmd.index('-qmp')+1].split(':')[2].split(',')[0])
+            if gdb_port is not None:
+                while True:
+                    try:
+                        memory = GDBMemory(gdb_port)
+                        break
+                    except ConnectionRefusedError:
+                        if time.monotonic() >= deadline or process.poll() is not None:
+                            raise RuntimeError('QEMU RAM preload endpoint did not start')
+                        time.sleep(0.5)
+                try:
+                    def progress(done, size):
+                        (output / 'progress.json').write_text(json.dumps(dict(
+                            result, status='loading_system', system_bytes_loaded=done,
+                            system_bytes=size, host_seconds=round(time.monotonic()-started, 2)), indent=2))
+                        print(f'guest RAM: {done}/{size} bytes', flush=True)
+                    result['system_transfer'] = memory.load(args.system, RD_ADDR, deadline, progress)
+                    if result['system_transfer']['sha256'] != inputs['system']['sha256']:
+                        raise RuntimeError('system image changed between hashing and RAM preload')
+                    memory.detach()
+                finally:
+                    memory.close()
             while process.poll() is None and time.monotonic() < deadline:
                 if 'kernel_started_host_seconds' not in result and guest_started(output / 'console.log'):
                     result['kernel_started_host_seconds'] = round(time.monotonic() - started, 2)
@@ -222,7 +258,7 @@ def main():
                     result['screenshot'] = True
                     (output / 'progress.json').write_text(json.dumps(
                         dict(result, status='running', host_seconds=round(time.monotonic() - started, 2)), indent=2))
-                    next_snapshot += 20
+                    next_snapshot = time.monotonic() - started + 20
                 time.sleep(0.5)
             if monitor and process.poll() is None:
                 snapshot(monitor, output, time.monotonic() - started)

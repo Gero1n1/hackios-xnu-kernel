@@ -1,0 +1,46 @@
+name: Host portability checks
+on:
+  workflow_dispatch:
+  push:
+    branches: [sweet-port]
+    paths: ['tools/windows/**', 'tools/platform-test/**', 'tools/gmu-test/**', 'xnu/files/bsd/sys/adreno_gmu_firmware.h', '.github/workflows/host-checks.yml']
+  pull_request:
+    paths: ['tools/windows/**', 'tools/platform-test/**', 'tools/gmu-test/**', 'xnu/files/bsd/sys/adreno_gmu_firmware.h', '.github/workflows/host-checks.yml']
+permissions:
+  contents: read
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Gero1n1/hackios-xnu-userland
+          ref: 7c73287e8f3be7905d17d994db43f2b68df75db8
+          path: companion
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Prepare the source-only companion overlay
+        run: python -c "import shutil; shutil.copytree('companion/tools/apfs', 'tools/apfs'); shutil.copytree('companion/userland', 'userland'); shutil.copytree('companion/ios165', 'ios165')"
+      - name: Run host regressions
+        shell: bash
+        run: |
+          python -m unittest discover -s tools/windows/tests -q
+          python -m unittest discover -s userland -p test_mkjobs.py -q
+          python -m unittest discover -s tools/apfs -p test_host_writer.py -q
+      - name: Native GMU bounds, AddressSanitizer and UBSan
+        if: runner.os == 'Linux'
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-c
+          /tmp/gmu-c
+          c++ -std=c++14 -Wall -Wextra -Werror -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-cpp
+          /tmp/gmu-cpp
+          clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-ubsan
+          /tmp/gmu-ubsan
