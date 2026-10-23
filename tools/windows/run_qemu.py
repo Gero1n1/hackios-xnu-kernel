@@ -101,6 +101,12 @@ def console_evidence(path):
     }
 
 
+def guest_started(path):
+    # Only the bounded prefix: the banner precedes userland's large logs.
+    with path.open('rb') as stream:
+        return b'Darwin Kernel Version ' in stream.read(64 << 10)
+
+
 def command(args, output, port):
     cmd = [str(args.qemu), '-M', 'virt,gic-version=3', '-cpu', 'cortex-a76',
            '-smp', str(args.cpus), '-m', f'{args.memory_gib}G',
@@ -142,11 +148,15 @@ def main():
     parser.add_argument('--control-port', type=int, default=0, help='optional second loopback QMP monitor')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--seconds', type=int, default=120)
+    parser.add_argument('--startup-seconds', type=int, default=240,
+                        help='separate bound for RAM preload/UEFI before the kernel starts')
     parser.add_argument('--cpus', type=int, default=1, choices=range(1, 5))
     parser.add_argument('--memory-gib', type=int, default=7, choices=range(5, 9))
     args = parser.parse_args()
     if not 15 <= args.seconds <= 1800:
         parser.error('seconds must be 15..1800')
+    if not 15 <= args.startup_seconds <= 600:
+        parser.error('startup-seconds must be 15..600')
     if args.control_port and not 1024 <= args.control_port <= 65535:
         parser.error('control-port must be 1024..65535')
     for name in ('qemu', 'efi', 'vars', 'ramdisk', 'system', 'loader', 'kernel'):
@@ -185,6 +195,7 @@ def main():
                   status='started', screenshot=False, log_limit=False,
                   stop_reason=None, host_terminated=False)
     started = time.monotonic()
+    deadline = started + args.startup_seconds
     process = None
     monitor = None
     next_snapshot = 20
@@ -193,7 +204,10 @@ def main():
             process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             port = int(cmd[cmd.index('-qmp')+1].split(':')[2].split(',')[0])
-            while process.poll() is None and time.monotonic() - started < args.seconds + 40:
+            while process.poll() is None and time.monotonic() < deadline:
+                if 'kernel_started_host_seconds' not in result and guest_started(output / 'console.log'):
+                    result['kernel_started_host_seconds'] = round(time.monotonic() - started, 2)
+                    deadline = time.monotonic() + args.seconds + 40
                 if monitor is None:
                     try:
                         monitor = QMP(port)
@@ -206,13 +220,17 @@ def main():
                 if monitor and time.monotonic() - started >= next_snapshot:
                     snapshot(monitor, output, time.monotonic() - started)
                     result['screenshot'] = True
+                    (output / 'progress.json').write_text(json.dumps(
+                        dict(result, status='running', host_seconds=round(time.monotonic() - started, 2)), indent=2))
                     next_snapshot += 20
                 time.sleep(0.5)
             if monitor and process.poll() is None:
                 snapshot(monitor, output, time.monotonic() - started)
                 result['screenshot'] = True
             if result['stop_reason'] is None:
-                result['stop_reason'] = 'process_exit' if process.poll() is not None else 'host_deadline'
+                result['stop_reason'] = ('process_exit' if process.poll() is not None else
+                                         'host_deadline' if 'kernel_started_host_seconds' in result else
+                                         'startup_deadline')
             result['status'] = 'captured' if result['screenshot'] else 'exited_without_snapshot'
     except Exception as error:
         result.update(status='host_error', stop_reason='host_error', error=str(error))

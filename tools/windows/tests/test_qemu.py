@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from run_qemu import command, console_evidence, snapshot
+from run_qemu import command, console_evidence, snapshot, guest_started
 
 
 class Monitor:
@@ -74,6 +74,16 @@ class QemuTests(unittest.TestCase):
             evidence = console_evidence(log)
             self.assertTrue(evidence['panic_marker'])
             self.assertTrue(evidence['early_exception'])
+
+    def test_kernel_budget_starts_after_preload_and_uefi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'console.log'
+            log.write_bytes(b'UEFI firmware\n')
+            self.assertFalse(guest_started(log))
+            log.write_bytes(b'UEFI firmware\nDarwin Kernel Version 22.5.0: fixture\n')
+            self.assertTrue(guest_started(log))
+            log.write_bytes(b'x' * (64 << 10) + b'Darwin Kernel Version ')
+            self.assertFalse(guest_started(log))
 
 
 if __name__ == '__main__':

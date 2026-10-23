@@ -136,6 +136,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new output directory')
     parser.add_argument('--small-only', action='store_true', help='rebuild root.apfs, reuse an existing system image')
+    parser.add_argument('--oslog', action='append', metavar='JOB_LABEL',
+                        help='send this job os_log to console; repeat for selected jobs')
     args = parser.parse_args()
     ios = ROOT / 'ios165'
     required = [ios / 'system.manifest', ios / 'rootfs.slt', ios / 'cryptex.slt',
@@ -214,7 +216,7 @@ def main():
     jobs = output / 'LaunchDaemons'
     subprocess.run([sys.executable, str(ROOT / 'userland/mkjobs.py'), '--rest',
                     str(ios / 'rootfs'), str(jobs), *JOBS],
-                   env=dict(os.environ, OSLOG='com.apple.backboardd'), check=True)
+                   env=dict(os.environ, OSLOG=' '.join(args.oslog or ['com.apple.backboardd'])), check=True)
     for source in jobs.iterdir():
         regular(small, 'LaunchDaemons/' + source.name, source)
     for name in ('demo', 'wifi', 'varstore'):

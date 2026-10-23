@@ -146,6 +146,13 @@ Apple `c54f35ca767986246321eb901baf8f5ff7923f6a`. This is the generic port's
 supported KPI list, not a patch intended for an actual Apple hardware build.
 The new full CI result is still pending.
 
+Run `39898735749` confirms the missing-export failures are gone and all seven
+symbol sets are generated. Its remaining failure is host portability in
+`check_all_exports`: the symbol-set tool cannot write its output to `/dev/null`
+(`couldn't write output: Success`). Changed both checks to write separate
+regular files in their existing build directory. Both checks and their errors
+remain active. The follow-up full build result is pending.
+
 ## 23 October: boot wait chain
 
 Downloaded/extracted the 591,855,616-byte shared-cache symbol member from the
@@ -165,6 +172,16 @@ first logging wait is not established as a permanent deadlock. The full run
 and lock-screen result are still pending. Board-identity C tests also pass
 under Zig's undefined-behavior sanitizer, exit 0 with no diagnostics; all 22
 Python host tests passed again on 23 October.
+
+Final run-3 result: 643.86 host seconds, initial 36 checks and IOSurface 80
+checks passed, but a real kernel panic occurred at about 510 guest seconds.
+Ticket lock `pset0 + 0x100` timed out after 84,354,243 ticks (limit 60,000,000)
+in `sched_clutch_thread_update_scan` / `sched_timeshare_maintenance_continue`,
+with four CPUs. The loader return includes this panic and is not a clean
+boot result. Host termination afterward has exit 1. No timeout was relaxed.
+Host descheduling/page pressure is a hypothesis, not an established cause.
+The 4-MiB diagnostic image `windows-qemu-diag-1/root.apfs` has been built and
+its selected job OS_ACTIVITY_DT_MODE settings read back from APFS.
 
 ## Preventing redwood hardware sequences on sweet
 
