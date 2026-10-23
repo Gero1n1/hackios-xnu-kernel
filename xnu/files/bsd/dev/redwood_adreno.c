@@ -99,6 +99,7 @@
 #include <sys/redwood_input.h>
 #include <sys/hackios_platform.h>
 #include <sys/adreno_gmu_firmware.h>
+#include <sys/adreno618_firmware.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -106,6 +107,16 @@
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+
+/* Separate, dormant SM7150 binding: this does not enter the redwood power or
+ * startup sequence. A future sweet power/clock driver supplies the mapping.
+ */
+int
+adreno618_gmu_upload(const struct adreno618_gmu_mapping *mapping,
+    const void *firmware, size_t firmware_bytes, bool verify)
+{
+	return adreno618_gmu_upload_checked(mapping, firmware, firmware_bytes, verify);
+}
 
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
@@ -2563,6 +2574,7 @@ static bool
 step_core_space(void)
 {
 	const uint8_t *microcode;
+	struct adreno_sqe_view sqe;
 	uint64_t size = 0;
 	uint32_t stream1 = 1;
 
@@ -2572,13 +2584,13 @@ step_core_space(void)
 	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
 	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
 	microcode = image_file("fw", "a660_sqe.fw", &size);
-	if (microcode == NULL || size < 8 || size > 0x40000 ||
+	if (!adreno_sqe_code(microcode, size, 0x40000, &sqe) ||
 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
-	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
+	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)sqe.bytes, PTE_CORE | PTE_READ_ONLY) ||
 	    !block_new(&core_space, &core_scratch, CORE_SCRATCH_ADDRESS, 4096, PTE_CORE)) {
 		return false;
 	}
-	memcpy((void *)core_sqe.memory, microcode + 4, size - 4);       /* the file's first word is not microcode */
+	memcpy((void *)core_sqe.memory, sqe.code, sqe.bytes);       /* the file's first word is not microcode */
 	to_memory(core_sqe.memory, core_sqe.size);
 
 	announce("give the SMMU's context 0 these tables and send the 3D core's requests (stream 0) through it");

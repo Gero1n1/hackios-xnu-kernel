@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [sweet-port]
-    paths: ['tools/windows/**', 'tools/platform-test/**', 'tools/gmu-test/**', 'xnu/files/bsd/sys/adreno_gmu_firmware.h', '.github/workflows/host-checks.yml']
+    paths: ['tools/windows/**', 'tools/platform-test/**', 'tools/gmu-test/**', 'tools/a618-test/**', 'xnu/files/bsd/sys/adreno*_firmware.h', '.github/workflows/host-checks.yml']
   pull_request:
-    paths: ['tools/windows/**', 'tools/platform-test/**', 'tools/gmu-test/**', 'xnu/files/bsd/sys/adreno_gmu_firmware.h', '.github/workflows/host-checks.yml']
+    paths: ['tools/windows/**', 'tools/platform-test/**', 'tools/gmu-test/**', 'tools/a618-test/**', 'xnu/files/bsd/sys/adreno*_firmware.h', '.github/workflows/host-checks.yml']
 permissions:
   contents: read
 jobs:
@@ -44,3 +44,9 @@ jobs:
           /tmp/gmu-cpp
           clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-ubsan
           /tmp/gmu-ubsan
+          cc -std=c11 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/a618-test/test.c -o /tmp/a618-c
+          /tmp/a618-c
+          c++ -std=c++14 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/a618-test/test.c -o /tmp/a618-cpp
+          /tmp/a618-cpp
+          clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Itools/platform-test/include -Ixnu/files/bsd tools/a618-test/test.c -o /tmp/a618-sanitized
+          /tmp/a618-sanitized
