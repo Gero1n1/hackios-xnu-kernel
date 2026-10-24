@@ -35,7 +35,8 @@ KEYS = {'lock': 'l', 'home': 'h', 'volup': 'up', 'voldown': 'down', 'fivefingers
 
 class Qmp:
     def __init__(self, port=None):
-        self.sock = socket.create_connection(('127.0.0.1', port or 4445 + 10 * instance()))
+        port = port or int(os.environ.get('QEMU_CONTROL_PORT') or 4445 + 10 * instance())
+        self.sock = socket.create_connection(('127.0.0.1', port))
         self.file = self.sock.makefile('rw')
         self.file.readline()                        # the greeting
         self.command('qmp_capabilities')

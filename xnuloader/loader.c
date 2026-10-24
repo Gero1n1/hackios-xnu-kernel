@@ -523,6 +523,7 @@ struct platform {
 	int cores;                       /* at most this many processor cores, numbered from 0 ... */
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
+	uint32_t ticket_timeout_scale;   /* extra scale for the ticket lock alone, 0: no extra scale */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
 	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
 };
@@ -534,9 +535,15 @@ static const struct platform platform_qemu_virt = {
 	/*
 	 * QEMU's emulated cores stop each other all the time (every flush of a page from all the
 	 * TLBs is a rendezvous of all its CPU threads), and the kernel's patience with a spin lock
-	 * is that of real hardware: an eighth of a second by a 24 MHz clock, a twentieth here.
+	 * is that of real hardware: an eighth of a second by a 24 MHz clock. A first four-CPU run
+	 * still timed out after 84,354,243 ticks against the 20x (60,000,000-tick) limit while the
+	 * pset lock sat in the documented acquire/unlock owner window. Keep 20x for the other
+	 * machine timeouts. The current kernel does not consume a separate ticket-lock scale
+	 * from this node; run_qemu.py passes tlto_us=25000000, which
+	 * ml_init_lock_timeout() reads. The property below is kept for a kernel that implements
+	 * it, but it is not the effective QEMU ticket timeout. Real hardware emits neither scale.
 	 */
-	.timeout_scale = 20,
+	.timeout_scale = 20, .ticket_timeout_scale = 10,
 };
 
 static const struct platform platform_redwood = {
@@ -3120,6 +3127,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		/* multiplies every "machine timeout" of the kernel (machine_timeout_init_with_suffix()) */
 		dt_begin(&w, "machine-timeouts");
 		dt_prop_u32(&w, "global-scale", plat->timeout_scale);
+		if (plat->ticket_timeout_scale != 0) {
+			/* the ticket lock gets this extra factor on top of global-scale */
+			dt_prop_u32(&w, "ticket-lock-scale", plat->ticket_timeout_scale);
+		}
 		dt_end(&w);
 	}
 	dt_end(&w);

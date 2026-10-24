@@ -108,6 +108,21 @@ def guest_started(path):
         return b'Darwin Kernel Version ' in stream.read(64 << 10)
 
 
+def boot_arguments(args):
+    """Build QEMU-only arguments; thermal requests synthetic samples, never phone MMIO."""
+    values = [f'loader_return_after={args.seconds}', f'epoch={int(time.time())}',
+              'virtio_input=1', f'cpus={args.cpus}', 'tlto_us=25000000']
+    if args.network:
+        values.append('virtio_net=1')
+    if getattr(args, 'wifi', False):
+        values.append('wifi_qemu=1')
+    if getattr(args, 'charging', False):
+        values.append('battery=1')
+    if getattr(args, 'thermal', False):
+        values.append('thermal=1')
+    return ' '.join(values)
+
+
 def command(args, output, port, gdb_port=None):
     cmd = [str(args.qemu), '-M', 'virt,gic-version=3', '-cpu', 'cortex-a76',
            '-smp', str(args.cpus), '-m', f'{args.memory_gib}G',
@@ -153,20 +168,32 @@ def main():
     parser.add_argument('--system-transfer', choices=('gdb', 'loader'), default='gdb',
                         help='stream to paused guest RAM (default), or use the memory-heavy raw loader')
     parser.add_argument('--network', action='store_true', help='QEMU NAT + emulated virtio-net (not phone Wi-Fi)')
+    parser.add_argument('--wifi', action='store_true',
+                        help='synthetic Wi-Fi station "HackiOS-QEMU" over virtio-net (emulation, not WCN3990); needs --network')
+    parser.add_argument('--charging', action='store_true',
+                        help='QEMU synthetic battery on a charger (emulation, not the phone fuel gauge)')
+    parser.add_argument('--thermal', action='store_true',
+                        help='enable QEMU synthetic thermal samples; does not access sweet MMIO')
     parser.add_argument('--control-port', type=int, default=0, help='optional second loopback QMP monitor')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--seconds', type=int, default=120)
+    parser.add_argument('--host-grace', type=int, default=40,
+                        help='seconds after the guest budget before stopping QEMU')
     parser.add_argument('--startup-seconds', type=int, default=600,
                         help='separate bound for RAM preload/UEFI before the kernel starts')
     parser.add_argument('--cpus', type=int, default=1, choices=range(1, 5))
     parser.add_argument('--memory-gib', type=int, default=7, choices=range(5, 9))
     args = parser.parse_args()
-    if not 15 <= args.seconds <= 1800:
-        parser.error('seconds must be 15..1800')
+    if not 15 <= args.seconds <= 7200:
+        parser.error('seconds must be 15..7200')
+    if not 0 <= args.host_grace <= 600:
+        parser.error('host-grace must be 0..600')
     if not 15 <= args.startup_seconds <= 600:
         parser.error('startup-seconds must be 15..600')
     if args.control_port and not 1024 <= args.control_port <= 65535:
         parser.error('control-port must be 1024..65535')
+    if args.wifi and not args.network:
+        parser.error('--wifi needs --network')
     for name in ('qemu', 'efi', 'vars', 'ramdisk', 'system', 'loader', 'kernel'):
         path = getattr(args, name)
         if path:
@@ -186,10 +213,13 @@ def main():
     shutil.copyfile(args.loader, efi_boot / 'BOOTAA64.EFI')
     shutil.copyfile(args.vars, output / 'vars.fd')
     kernel = args.kernel
+    # The current kernel does not consume the loader's device-tree
+    # ticket-lock-scale property.  tlto_us is read by ml_init_lock_timeout()
+    # and gives the ticket lock the intended QEMU-only 25 seconds; without it
+    # a host-descheduled vCPU can hit the 20x global timeout (60,000,000 ticks).
     payload = [sys.executable, str(ROOT / 'xnuloader/mkpayload.py'), '-o',
                str(output / 'payload.bin'), f'kernel={kernel}', f'ramdisk={args.ramdisk}',
-               '--cmdline', f'loader_return_after={args.seconds} epoch={int(time.time())} '
-               f'virtio_input=1 cpus={args.cpus}' + (' virtio_net=1' if args.network else '')]
+               '--cmdline', boot_arguments(args)]
     if args.system:
         payload += ['--rdres', f'{args.system.stat().st_size:x}']
     subprocess.run(payload, check=True)
@@ -243,7 +273,7 @@ def main():
             while process.poll() is None and time.monotonic() < deadline:
                 if 'kernel_started_host_seconds' not in result and guest_started(output / 'console.log'):
                     result['kernel_started_host_seconds'] = round(time.monotonic() - started, 2)
-                    deadline = time.monotonic() + args.seconds + 40
+                    deadline = time.monotonic() + args.seconds + args.host_grace
                 if monitor is None:
                     try:
                         monitor = QMP(port)

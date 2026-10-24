@@ -138,6 +138,8 @@ def main():
     parser.add_argument('--small-only', action='store_true', help='rebuild root.apfs, reuse an existing system image')
     parser.add_argument('--oslog', action='append', metavar='JOB_LABEL',
                         help='send this job os_log to console; repeat for selected jobs')
+    parser.add_argument('--no-redwood-jobs', action='store_true',
+                        help='omit com.redwood.demo/wifi/varstore for a clean iOS boot')
     args = parser.parse_args()
     ios = ROOT / 'ios165'
     required = [ios / 'system.manifest', ios / 'rootfs.slt', ios / 'cryptex.slt',
@@ -219,9 +221,10 @@ def main():
                    env=dict(os.environ, OSLOG=' '.join(args.oslog or ['com.apple.backboardd'])), check=True)
     for source in jobs.iterdir():
         regular(small, 'LaunchDaemons/' + source.name, source)
-    for name in ('demo', 'wifi', 'varstore'):
-        source = ROOT / f'userland/com.redwood.{name}.plist'
-        regular(small, 'LaunchDaemons/' + source.name, source)
+    if not args.no_redwood_jobs:
+        for name in ('demo', 'wifi', 'varstore'):
+            source = ROOT / f'userland/com.redwood.{name}.plist'
+            regular(small, 'LaunchDaemons/' + source.name, source)
     image(small, 'redwood', output / 'root.apfs')
     if not args.small_only:
         image(system, 'System', output / 'system.apfs')

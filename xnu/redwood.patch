@@ -65,7 +65,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..9cd24b42caca 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,37 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,38 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -100,6 +100,7 @@ index 44274016a4cf..9cd24b42caca 100644
 +bsd/dev/redwood_wlfw.c		standard
 +bsd/dev/redwood_lx.c		standard
 +bsd/dev/redwood_sta.c		standard
++bsd/dev/redwood_thermal.c	standard
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard

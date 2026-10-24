@@ -1,11 +1,13 @@
 # sweet migration status — 2026-10-23
 
 Latest source milestone: `fd68e441f756e9614aef905a336c2948d278865f`.
-Full XNU CI and 34 Python tests on Windows/Ubuntu pass. QEMU run 5 completed
-600 guest seconds with a normal loader return and no observed panic, but
-only Apple's logo is confirmed. The four-CPU scheduler panic remains open.
-No native sweet hardware feature is newly claimed. Read the final sections
-below for current hashes, run IDs and the next concrete actions.
+Full XNU CI and all Python host suites pass: 55 Windows-tool tests, 4 userland
+tests and 2 APFS tests. QEMU run 8 completed 600 guest seconds with a normal
+loader return and no panic marker, but UI beyond Apple's logo is not claimed.
+The four-CPU scheduler panic now has a QEMU-only timeout tolerance; the native
+root cause remains unproven. No native sweet hardware feature is newly claimed.
+Read the final sections below for current hashes, run IDs and the next concrete
+actions.
 
 Active worktree: `E:/hackios-sweet`, kernel branch `sweet-port`. Original
 `E:/порт/ios-sweet` is preserved, including its local commits and driver work.
@@ -261,10 +263,135 @@ Next: investigate initial LaunchServices registration to reach the real UI.
 A longer bounded single-CPU run or an explicitly labelled diagnostic
 comparison of on-demand job policies can distinguish slow initial reseeding
 from a dependency that never finishes. Keep the normal recipe's services
-intact and do not call a reduced diagnostic image a usable system. Separately,
-reproduce/symbolicate the four-CPU `pset0 + 0x100` ticket-lock panic; host
-descheduling remains only a hypothesis. Native A618/WCN3990/charging/panel
-work still requires target-specific implementation and future sweet checks.
+intact and do not call a reduced diagnostic image a usable system. The
+four-CPU `pset0 + 0x100` ticket-lock panic now has a QEMU-only timeout
+tolerance and a clean four-CPU run 8; host descheduling remains a hypothesis,
+not a proven guest scheduler defect. Native A618/WCN3990/charging/panel work
+still requires target-specific implementation and future sweet checks.
+
+## Clean-boot diagnostic (run 9)
+
+`tools/windows/build_images.py` now has `--no-redwood-jobs`, which omits
+`com.redwood.demo`, `com.redwood.wifi` and `com.redwood.varstore`. This removes
+the diagnostic `cpu_test 240 &` from the boot without removing any Apple
+service. The resulting image `userland/windows-qemu-3/root.apfs` has SHA-256
+`f8d29ec969ab09187f12f1ee6b34ab7f6d07518e7583d5d0b2c84bca47c94b98`; the
+LaunchDaemons readback contains no `com.redwood.*` job.
+
+Run 9 (`E:/hackios-qemu-ios165-9`) used 4 CPUs, 7 GiB, the same kernel, system
+image and fixed loader as run 8, and 600 guest seconds. Kernel start was at
+322.91 host seconds; the run ended at 964.14 host seconds with the loader
+returned, no panic marker and no early exception. The initial 36 checks passed.
+The final screenshot is still Apple's logo, so the lock screen is still not
+validated. `lsd` logged the CPU-monitor denial 317 times, and SpringBoard's
+constructor logged the activation/setup-assistant and battery hooks, but no
+Siri-orb prewarm line appeared: SpringBoard still has not reached
+`applicationDidFinishLaunching`. Removing the diagnostic CPU stress did not
+change the LaunchServices wait within 600 seconds.
+
+## Run 10: lsd progress and the effective ticket timeout
+
+`userland/windows-qemu-4/root.apfs` has SHA-256
+`935e44b3611e7ea1cf689547ff97316a9f1a7823332efb62a990747b0bf0c7e9`; it is the
+run 9 clean root with `OS_ACTIVITY_DT_MODE` on `lsd` and no `com.redwood.*`
+jobs. Run 10 (`E:/hackios-qemu-ios165-10`) used 4 CPUs, 6 GiB, the same
+kernel/system/loader, a QMP control port and 900 guest seconds. It ended at
+1242.88 host seconds (kernel start 301.92) on the host deadline; the loader
+returned, the initial 36 checks passed, and the panic marker was set. The
+final screenshot is still Apple's logo.
+
+The stack samples show progress, not a proven deadlock. At lsd uptime 321.268
+thread 0x1b1 had one stack; at 627.780 it had a different stack and lsd had
+grown from 7 to 8 threads. `top` reported lsd at 20.6% of the processor at
+325 s and 59.1% at 627 s. `lsd` was creating plugin data containers
+(`makeContainerLiveReplacingContainer`) and logged the existing
+`container_set_data_protection... UNSUPPORTED` failure for each; it was still
+working when the panic cut the run off. SpringBoard's stack was identical at
+323.598 and 630.084 and still waited for LaunchServices; no Siri-orb line or
+lock screen appeared. The planned third stack sample produced no stack
+because the panic intervened.
+
+The panic is the QEMU ticket-lock timeout, not an lsd crash: CPU 2, task lsd
+pid 24, thread tid 1452, lock `0xfffffff9002a1c20`, cticket `0xfb`,
+nticket `0xfc`, waiter `0x7a`, owner 0 on CPU -1, elapsed 62,391,000 ticks
+against `timeout: 60000000`. The backtrace was
+`hw_lck_ticket_timeout_panic` ← `hw_spin_should_keep_spinning` ←
+`hw_lck_ticket_contended` ← `lck_ticket_contended` ←
+`workq_unpark_continue+0x3c` ← `Call_continuation`. The timeout value is
+exactly the 20x global scale: the loader's `ticket-lock-scale=10` property is
+not consumed by this kernel. The QEMU runner now adds `tlto_us=25000000` to
+the boot arguments; `ml_init_lock_timeout()` reads it and sets the ticket
+timeout to 25 s. The loader property is kept for a kernel that implements it,
+but it was inert here. This is QEMU-only; the redwood/sweet profile has no
+such boot arg and keeps the default.
+
+The next run uses the same clean root, `tlto_us=25000000`, 1200 guest seconds,
+6 GiB, `--host-grace 180` and the QMP control port, to see whether lsd finishes
+the initial seeding and BootUI leaves the Apple logo. No lock-screen claim is
+made from run 10.
+
+## Run 11: full kernel budget without the ticket-lock panic; first SpringBoard UI steps at the cut
+
+Run 11 (`E:/hackios-qemu-ios165-11`) was the first run of the
+`tlto_us=25000000` boot argument plus `--host-grace 180`: 4 CPUs, 6 GiB, the
+same clean root, kernel, system image and loader as run 10, control port 4447,
+1200 seconds. It ended on the host deadline at 1691.55 host seconds (kernel
+start 310.84), the loader returned, the initial 36 checks passed, and the
+panic marker was false. The run 10 panic signature (ticket-lock timeout on a
+`workq_unpark_continue` continuation) did not recur. One clean run does not
+claim that spinning can never time out in another shape; it records only that
+no panic occurred within this budget.
+
+The console is two streams: the live serial flow (boot to about 00:30 guest
+time) followed by the kernel log the loader returned, whose 1,359,805-byte
+buffer stopped accepting entries at 00:13:52; counts must come from the live
+flow or they double-count. `lsd` finished the extension-container phase of
+initial LaunchServices seeding: 682 `makeContainerLive` plugin data containers
+with 661 distinct bundle identifiers (426 in run 10), one to two host seconds
+per container, and the phase closed with
+`-[MILaunchServicesDatabaseGatherer performGatherWithError:]: Updated app
+extension data containers with parent bundle IDs` at 00:25:51, about 13.7
+guest minutes after it began at 00:12:08.
+
+SpringBoard's launch-services wait then ended. In the final seconds of the
+budget the live log shows the first SpringBoard UI activity: orientation
+events requested from backboardd (00:29:35), BootUI still sustaining the boot
+logo for pid 8 (00:29:49), `Unbalanced calls to begin/end appearance
+transitions for <SBCoverSheetPrimarySlidingViewController>` (00:29:59) and
+`UISensor ... reason: SB + backlight-off + pocketTouches;
+proximityDetectionMode: locked` (00:29:59). The screen at the cut is still the
+Apple logo and the surface checks remain unpassed, but the ambiguously
+logging launch hook lines like the Siri-orb prewarm are not the only evidence:
+the cover-sheet object and the sensor mode are SpringBoard UI code running.
+CoreMotion could not set orientation properties (`fHidDeviceInterface NULL`,
+`No reply for LastOrientation`, orientation resolved to unknown): expected on
+QEMU with no accelerometer, recorded as a gap.
+
+Symbolicated run 11 stacks (`qemu/symstack.py` with the exact extracted
+16.5 shared cache) mark the transition precisely. At uptime 323.013, 629.540
+and 936.033 SpringBoard's main thread was blocked in
+`-[CCSModuleRepository _queue_filterModuleMetadataByAssociatedBundleAvailability:]`
+← `LSApplicationRecord initWithBundleIdentifier` ← LaunchServices database
+context, and another thread waited in `LSCopyServerStore` under
+`___LAUNCH_SERVICES_IS_RESEEDING_ITS_DATABASE_AND_MAY_BLOCK__`; identical
+stacks until seeding ended. At uptime 1142.565 SpringBoard had 22 threads, the
+main thread was running `-[SBHIconManager _precacheDataForRootIcons]`
+← `UIImage imageNamed` asset loading, a `com.apple.uikit.eventfetch-thread`
+existed, `SBWorkspaceKeyboardFocusController` set up the keyboard arbiter, and
+CoreMotion had a `MotionThread`. This documents the wait ending and real UI
+work starting; it does not claim which UI object became visible.
+
+New measurement notes for the next run: repeating
+`Failed to copy activation record ... "Device is not activated"` lines from
+lsd are the known activation gap; `kpersona_find_by_type()` fails with errno 3
+313 times and `com.apple.wifi.manager` lookup fails 26 times, recorded, not
+fixed here. Guest userland timestamps run roughly 0.8 times host speed
+(run 10 about 0.81, run 11 about 0.85), like run 10.
+
+Run 12 repeats run 11 with a 3600-second budget, because the first SpringBoard
+UI steps began right at the 1200-second cut. `tools/windows/run_qemu.py`
+previously rejected `--seconds` above 1800; its ceiling is now 7200 with a unit
+test, because long TCG boots are a deliberate measurement need.
 
 Rechecked both upstream main refs on 23 October: kernel remains `8e61187`,
 userland `906425b`; no unseen upstream update was incorporated or assumed.
@@ -296,3 +423,56 @@ The original ios-sweet 0088 kernel CI run `39812559222` ended without running
 build steps: GitHub annotations say the hosted runner could not acquire the
 job and cite macOS ARM64 capacity constraints. This is not a successful build
 or a source compilation failure. Last verified original-port kernel is 0087.
+
+## 23 October: four-CPU pset ticket-lock timeout
+
+Run 3 (`-smp 4`, kernel `ci-39897654980`, SHA-256
+`b7dab25a7bde08a5e2344c9a995f5a43230065629538b7acf5b4126d43c2b3ff`,
+loader `3da5dc9b8f37ad225fde299c1d35bf2b966fa2c99157f8343e23f3da76412bcf`)
+panicked in `hw_lck_ticket_timeout_panic` on `pset0 + 0x100` after
+84,354,243 ticks against a 60,000,000-tick limit. The ticket state was
+`cticket=0x38`, `nticket=0x3c`, waiter `0x3a`, advisory owner 0 (CPU -1).
+The backtrace was `hw_lck_ticket_timeout_panic` ←
+`hw_spin_should_keep_spinning` ← `hw_lck_ticket_contended` ←
+`lck_ticket_contended` ← `sched_clutch_thread_update_scan+0x60` ←
+`sched_timeshare_maintenance_continue+0xe4` ← `Call_continuation`.
+
+The pset lock is a `lck_ticket_t`. Apple's `lock_ticket.c` documents that the
+owner is advisory: it is recorded after the ticket is acquired and cleared
+before `cticket` advances. The timeout is measured with `ml_get_timebase`, not
+the owner's CPU time. The pre-panic snapshot `00500.2.txt` shows waiters but no
+coherent pset critical section; `smp-review.md` therefore does not claim a
+proven guest scheduler deadlock. The evidence is consistent with a QEMU MTTCG
+host vCPU being descheduled in one of those short windows; it does not prove
+that either.
+
+QEMU-only tolerance: the loader already emitted
+`/machine-timeouts/global-scale=20` for multi-core QEMU and later also emitted
+`/machine-timeouts/ticket-lock-scale=10`. Run 10 shows that this kernel does
+not consume the ticket-lock scale: its panic reports `timeout: 60000000`, the
+20x value, not the intended 200x. `tools/windows/run_qemu.py` now adds
+`tlto_us=25000000` to the kernel boot arguments, which
+`ml_init_lock_timeout()` reads and uses to set the ticket timeout to 25 s.
+The redwood/sweet profile emits neither scale and gets no such boot arg, so
+real hardware keeps XNU's default 0.125 s ticket-lock timeout. This is a
+bounded emulator tolerance, not a scheduler fix and not evidence that sweet
+hardware is unaffected.
+
+The rebuilt loader is `host-tools/loader-platform.efi`, SHA-256
+`bed924d8dc0d5195c4e630956af55f7d9bb554a6e34947e9bd273c87ac1bc34e`.
+Its source comment was later corrected to say that `ticket-lock-scale` is not
+consumed by this kernel; the comment-only edit does not change the binary (its
+hash above is unchanged).
+
+Verification: run 8 (`E:/hackios-qemu-ios165-8`) used the same kernel, root
+and system hashes as run 3, four CPUs and the rebuilt loader. It completed
+600 guest seconds in 950.17 host seconds
+(kernel start at 309.09 host seconds), returned the loader normally, and
+reported no panic marker or early exception. The initial 36 and IOSurface 80
+checks passed. QEMU was terminated at its host deadline (exit 1), not by a
+guest crash. The host was under memory pressure: QEMU's private commit was
+about 7.4 GiB on a 7.8 GiB machine, so this also exercised host descheduling.
+Run 8 streamed the system image over GDB instead of run 3's raw loader, so it
+is not a byte-for-byte controlled comparison. It confirms that the previous
+84M-tick timeout no longer fires; it does not prove a guest scheduler fix or
+any native sweet behavior.

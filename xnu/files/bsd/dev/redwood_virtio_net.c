@@ -16,8 +16,10 @@
 #include <mach/vm_param.h>
 #include <net/ethernet.h>
 #include <pexpert/pexpert.h>
+#include <sys/hackios_platform.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/redwood_net.h>
+#include <sys/redwood_sta.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
 
@@ -282,12 +284,24 @@ static struct redwood_net_link virtio_link = {
 void
 redwood_virtio_net_init(void)
 {
-	uint32_t enabled = 0;
+	uint32_t enabled = 0, wifi = 0;
 
 	if (!PE_parse_boot_argn("virtio_net", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	/*
+	 * wifi_qemu=1 (the runner's --wifi): present the virtio link as a radio and let the
+	 * synthetic station in redwood_sta.c own its link state. This is emulation: the frames
+	 * still go to QEMU's user-mode network, not through a WCN3990.
+	 */
+	if (hackios_platform_is("qemu-virt") &&
+	    PE_parse_boot_argn("wifi_qemu", &wifi, sizeof(wifi)) && wifi != 0) {
+		virtio_link.wireless = true;
+		virtio_link.up = false;         /* up when the synthetic station has joined */
+	}
 	if (!virtio_net_start(virtio_link.address) || !redwood_net_attach(&virtio_link)) {
 		printf("net: no network interface\n");
+		return;
 	}
+	redwood_sta_qemu_start();
 }
