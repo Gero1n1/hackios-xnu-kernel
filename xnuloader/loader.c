@@ -560,6 +560,24 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_sweet = {
+	/* SM7125 (sdmmagpie), Redmi Note 10 Pro: values from the pinned OEM device
+	 * tree, see docs/SWEET-LOADER-FACTS.md. io_base must be non-zero (XNU
+	 * skips clock setup otherwise); the window ends past the GIC
+	 * redistributor (0x17A60000 + 0x100000), covering the peripherals we
+	 * describe and nothing above. */
+	.name = "sweet", .io_base = 0x00400000, .io_size = 0x17C00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	/* CPUs 0-5 are the Kryo 560 Silvers (Cortex-A55, capacity-dmips-mhz 1024),
+	 * 6-7 the Golds (A76, 1740): the same little-first policy as redwood. */
+	.small_cores = 0x3f,
+	/* The sweet_k6a UEFI's simple framebuffer lives in the SoC map's Display
+	 * Reserved region (0x9C000000). HYPOTHESIS until the loader's own
+	 * "display W x H at ..." line on the handset confirms or corrects it. */
+	.fb_base = 0x9C000000,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -567,6 +585,7 @@ static const struct platform platform_redwood = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_sweet,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -3858,6 +3877,11 @@ usb_command_loop(void)
  */
 #define PHONE_WIDTH     1125            /* the screen of the iPhone X, whose identity we carry */
 #define PHONE_HEIGHT    2436
+/* HACKIOS_RAMFB_HEIGHT: QEMU's ramfb refuses a mode taller than 2048 (bochs-vbe's
+ * VBE_DISPI_MAX_YRES), so the panel is asked for 2048 rows and the kernel scales the
+ * 1125x2436 display into it -- the same thing it does on a real phone. Upstream fix
+ * a5863ff51a5250538308b99168f3a00cd4ac645c, hand-merged onto our polled-DMA version. */
+#define RAMFB_HEIGHT    2048
 #define FW_CFG_BASE     0x09020000ULL   /* QEMU virt: data at +0, selector at +8, DMA address at +16 */
 #define FW_CFG_FILE_DIR 0x19
 #define FW_CFG_DMA_SELECT 0x08
@@ -3894,7 +3918,7 @@ ramfb_phone_screen(void)
 		char name[56];
 	} file;
 	uint32_t count, select = 0;
-	uint64_t fb = 0, bytes = (uint64_t)PHONE_WIDTH * 4 * PHONE_HEIGHT;
+	uint64_t fb = 0, bytes = (uint64_t)PHONE_WIDTH * 4 * RAMFB_HEIGHT;
 
 	*(volatile uint16_t *)(FW_CFG_BASE + 8) = __builtin_bswap16(FW_CFG_FILE_DIR);
 	fw_cfg_read(&count, sizeof(count));
@@ -3913,7 +3937,7 @@ ramfb_phone_screen(void)
 	cfg.fourcc = be32(0x34325258);          /* 'XR24': blue, green, red, unused */
 	cfg.flags = 0;
 	cfg.width = be32(PHONE_WIDTH);
-	cfg.height = be32(PHONE_HEIGHT);
+	cfg.height = be32(RAMFB_HEIGHT);
 	cfg.stride = be32(PHONE_WIDTH * 4);
 	dma.control = be32(select << 16 | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
 	dma.length = be32(sizeof(cfg));
@@ -3932,12 +3956,16 @@ ramfb_phone_screen(void)
 		__asm__ volatile("yield" ::: "memory");
 	}
 	if (dma.control != 0) {
-		print("ramfb: control %x after the request\n", (uint64_t)be32(dma.control));
-		return;
+		/* HACKIOS: with the polled completion above this can still mean the
+		 * device kept an error bit; the mode it takes is the one in the panel.
+		 * Keep the requested 2048-row mode (never taller than bochs-vbe's
+		 * limit) so the kernel is not told a panel it does not have. */
+		print("ramfb: control %x after the request (the mode is taken as it stands)\n",
+		    (uint64_t)be32(dma.control));
 	}
 	SCREEN.base = fb;
 	SCREEN.width = PHONE_WIDTH;
-	SCREEN.height = PHONE_HEIGHT;
+	SCREEN.height = RAMFB_HEIGHT;
 	SCREEN.stride = PHONE_WIDTH * 4;
 }
 
