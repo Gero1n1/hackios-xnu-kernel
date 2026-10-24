@@ -293,10 +293,10 @@ thermal_pressure_sysctl(struct sysctl_oid *oidp, __unused void *arg1,
 
 SYSCTL_DECL(_kern_redwood);
 SYSCTL_INT(_kern_redwood, OID_AUTO, thermal_running, CTLFLAG_RD | CTLFLAG_LOCKED,
-	&thermal_running, "thermal sampling thread active");
+	&thermal_running, 0, "thermal sampling thread active");
 SYSCTL_PROC(_kern_redwood, OID_AUTO, thermal_pressure, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
 	NULL, 0, thermal_pressure_sysctl, "I", "thermal pressure 0-4; EAGAIN if sensors have no valid samples");
 SYSCTL_INT(_kern_redwood, OID_AUTO, thermal_samples_valid, CTLFLAG_RD | CTLFLAG_LOCKED,
-	&thermal_samples_valid, "1 when the latest thermal sample set contains valid sensors");
+	&thermal_samples_valid, 0, "1 when the latest thermal sample set contains valid sensors");
 SYSCTL_PROC(_kern_redwood, OID_AUTO, thermal, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
 	thermal_text, sizeof(thermal_text), thermal_string_sysctl, "A", "validated TSENS or QEMU synthetic samples");
