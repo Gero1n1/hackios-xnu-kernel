@@ -1,0 +1,82 @@
+name: sweet_k6a UEFI build
+on:
+  workflow_dispatch:
+  push:
+    branches: [sweet-port]
+    paths: ['uefi/**', '.github/workflows/sweet-uefi.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang llvm lld nasm gcc-aarch64-linux-gnu linux-libc-dev python3 python3-pip python3-venv
+          command -v nasm && command -v clang
+      - name: Clone Mu-Silicium at the pinned base
+        run: |
+          git clone https://github.com/Project-Silicium/Mu-Silicium.git Mu-Silicium
+          git -C Mu-Silicium checkout -q "$(cat uefi/BASE)"
+          git -C Mu-Silicium submodule update --init --recursive
+      - name: Apply the port and the sweet memory map
+        run: |
+          git -C Mu-Silicium apply --whitespace=nowarn "$PWD/uefi/mu-silicium.patch"
+          cp -r uefi/files/. Mu-Silicium/
+          git -C Mu-Silicium apply --whitespace=nowarn "$PWD/uefi/sweet-memory.patch"
+      - name: Use the system nasm instead of the NuGet extdep
+        run: |
+          D=Mu-Silicium/Mu_Basecore/BaseTools/Bin/mu_nasm_extdep
+          mkdir -p $D/Linux-x86-64
+          echo 'version: 20016.1.1' > $D/extdep_state.yaml
+          ln -s /usr/bin/nasm /usr/bin/ndisasm $D/Linux-x86-64/
+      - name: Set up the python environment
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -r Mu-Silicium/pip-requirements.txt
+      - name: Build the sweet_k6a UEFI (RELEASE)
+        run: |
+          source venv/bin/activate
+          cd Mu-Silicium
+          python3 build_uefi.py -d sweet_k6a -r RELEASE
+      - name: Build the XNU loader
+        run: |
+          bash xnuloader/build.sh
+          cp xnuloader/loader.efi artifacts-loader.efi
+      - name: Assemble the sweet phone boot image
+        run: |
+          # BootShim copies the UEFI FD to FD_BASE and the XNUP container to
+          # PAYLOAD_BASE (sweet_k6a map: FD 0x9FC00000+0x300000; payload in the
+          # high conventional RAM window redwood also uses).
+          make -C Mu-Silicium/BootShim REQUIRES_KERNEL_HEADER=1 FD_BASE=0x9FC00000 FD_SIZE=0x300000 \
+            CFLAGS='--target=aarch64-linux-gnu -DPAYLOAD_BASE=0xF0000000'
+          DTB=Mu-Silicium/Resources/DTBs/sweet_k6a.dtb
+          if [ ! -f "$DTB" ]; then
+            echo 'sweet_k6a.dtb not found; listing DTBs and using an empty DTB:'
+            ls Mu-Silicium/Resources/DTBs/ || true
+            : > /tmp/empty.dtb
+            DTB=/tmp/empty.dtb
+          fi
+          python3 xnuloader/mkpayload.py -o payload.bin loader.efi=artifacts-loader.efi --usb
+          FD_BASE=0x9FC00000 FD_SIZE=0x300000 PAYLOAD_BASE=0xF0000000 \
+          UEFI_FD=Mu-Silicium/Build/sweet_k6aPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd \
+          DTB="$DTB" \
+          python3 mkxnuimg.py -p payload.bin -o sweet-boot.img
+          sha256sum sweet-boot.img payload.bin
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          find Mu-Silicium/Build -type f \( -name 'SILICIUM_UEFI.fd' -o -iname '*BootShim*' \) -exec cp {} artifacts/ \; || true
+          cp artifacts-loader.efi artifacts/ 2>/dev/null || true
+          cp sweet-boot.img payload.bin artifacts/ 2>/dev/null || true
+          ls -la artifacts
+          sha256sum artifacts/* > artifacts/SHA256SUMS || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sweet-uefi
+          path: artifacts/

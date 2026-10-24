@@ -97,6 +97,10 @@
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/hackios_platform.h>
+#include <sys/adreno_hfi_codec.h>
+#include <sys/adreno_gmu_firmware.h>
+#include <sys/adreno618_firmware.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -104,6 +108,16 @@
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+
+/* Separate, dormant SM7150 binding: this does not enter the redwood power or
+ * startup sequence. A future sweet power/clock driver supplies the mapping.
+ */
+int
+adreno618_gmu_upload(const struct adreno618_gmu_mapping *mapping,
+    const void *firmware, size_t firmware_bytes, bool verify)
+{
+	return adreno618_gmu_upload_checked(mapping, firmware, firmware_bytes, verify);
+}
 
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
@@ -1745,7 +1759,9 @@ step_gmu_space(void)
 	}
 	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
 	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
-	if (gmu_firmware == NULL) {
+	if (!adreno_gmu_blocks_valid(gmu_firmware, gmu_firmware_size,
+	    GMU_ITCM_ADDRESS, GMU_DTCM_ADDRESS, GMU_TCM_SIZE)) {
+		printf("adreno: %u: missing or invalid block-format GMU firmware\n", step);
 		return false;
 	}
 	for (uint64_t at = 0; at + sizeof(struct gmu_firmware_block) <= gmu_firmware_size;) {
@@ -1762,7 +1778,8 @@ step_gmu_space(void)
 			continue;
 		}
 		if (gmu_block_count == sizeof(gmu_blocks) / sizeof(gmu_blocks[0]) || (block.address & 4095) ||
-		    block.value > 0x100000 || !block_new(&gmu_space, &gmu_blocks[gmu_block_count++], block.address, block.value,
+		    block.value == 0 || block.value > 0x100000 || (uint64_t)block.address + block.value > UINT64_C(0x100000000) ||
+		    !block_new(&gmu_space, &gmu_blocks[gmu_block_count++], block.address, block.value,
 		    PTE_GMU)) {
 			printf("adreno: %u: cannot make %#x bytes at %#x for the firmware\n", step, block.value, block.address);
 			return false;
@@ -1791,7 +1808,8 @@ step_gmu_firmware(void)
 {
 	uint32_t wrong = 0;
 
-	if (!cx_ready() || gmu_firmware == NULL) {
+	if (!cx_ready() || !adreno_gmu_blocks_valid(gmu_firmware, gmu_firmware_size,
+	    GMU_ITCM_ADDRESS, GMU_DTCM_ADDRESS, GMU_TCM_SIZE)) {
 		return false;
 	}
 	announce("load the GMU's firmware: its first 16K of code and of data through the GMU's registers (0x3d6d000, "
@@ -1807,7 +1825,8 @@ step_gmu_firmware(void)
 			if (block.size == 0) {
 				continue;
 			}
-			if (in_tcm(block.address) && in_tcm(block.address + block.size - 1)) {
+			if (adreno_gmu_range_inside(block.address, block.size, GMU_ITCM_ADDRESS, GMU_TCM_SIZE) ||
+			    adreno_gmu_range_inside(block.address, block.size, GMU_DTCM_ADDRESS, GMU_TCM_SIZE)) {
 				uint32_t registers = block.address < GMU_DTCM_ADDRESS ? GMU_ITCM + block.address - GMU_ITCM_ADDRESS :
 				    GMU_DTCM + block.address - GMU_DTCM_ADDRESS;
 
@@ -1834,7 +1853,7 @@ step_gmu_firmware(void)
 					return false;
 				}
 				if (block.address >= gmu_blocks[i].address &&
-				    block.address + block.size <= gmu_blocks[i].address + gmu_blocks[i].size) {
+				    (uint64_t)block.address + block.size <= gmu_blocks[i].address + gmu_blocks[i].size) {
 					memcpy((void *)(gmu_blocks[i].memory + (block.address - gmu_blocks[i].address)), data, block.size);
 					to_memory(gmu_blocks[i].memory, gmu_blocks[i].size);
 					printf("adreno: %u: %#x bytes at the GMU's %#x, in memory\n", step, block.size, block.address);
@@ -2073,8 +2092,8 @@ programmed:
 #define HFI_GX_BW_PERF_VOTE     30
 #define HFI_PREPARE_SLUMBER     33
 #define HFI_ERROR               100
-#define HFI_ANSWER              1               /* in bits 19:16 */
 #define HFI_NO_INDEX            0xff
+#define HFI_MESSAGE_WORDS       20              /* header, echoed command, status, 16-word payload */
 
 struct hfi_perf_table {
 	uint32_t header, gpu_levels, gmu_levels;
@@ -2095,36 +2114,78 @@ static bool post_mortem_done;
 
 /* Everything waiting in a queue of the GMU's; true if the answer to the message numbered `number` was among it. */
 static bool
-hfi_receive(unsigned which, uint32_t number, uint32_t *verdict)
+hfi_receive(unsigned which, uint32_t command, uint32_t *verdict, bool *malformed)
 {
-	volatile struct hfi_queue *queue = &hfi->queue[which];
-	volatile uint32_t *data = (volatile uint32_t *)((vm_offset_t)hfi + HFI_QUEUE_AT(which));
+	volatile struct hfi_queue *queue;
+	volatile uint32_t *data;
+	uint32_t used;
 	bool answered = false;
 
+	*malformed = false;
+	if (which >= HFI_QUEUES) {
+		*malformed = true;
+		return false;
+	}
+	queue = &hfi->queue[which];
+	data = (volatile uint32_t *)((vm_offset_t)hfi + HFI_QUEUE_AT(which));
+	if (queue->status != 1 || queue->words != HFI_QUEUE_WORDS ||
+	    !adreno_hfi_queue_valid(ADRENO_HFI_V2, hfi->active_queues, which, queue->type,
+	    queue->words, queue->read, queue->write) ||
+	    !adreno_hfi_ring_state(HFI_QUEUE_WORDS, queue->read, queue->write, &used)) {
+		*malformed = true;
+		return false;
+	}
 	while (queue->read != queue->write) {
-		uint32_t message[8] = { 0 }, at = queue->read % HFI_QUEUE_WORDS, words = data[at] >> 8 & 0xff;
+		uint32_t message[HFI_MESSAGE_WORDS] = { 0 }, read = queue->read, at = read;
+		uint32_t available = used, words = 0, padded, next_read;
+		struct adreno_hfi_fields fields;
+		enum adreno_hfi_result packet_result;
 
-		for (uint32_t i = 0; i < words; i++) {
-			if (i < 8) {
-				message[i] = data[at];
-			}
+		if (available == 0) {
+			*malformed = true;
+			return false;
+		}
+		message[0] = data[at];
+		fields = adreno_hfi_decode(message[0]);
+		words = fields.words;
+		packet_result = adreno_hfi_peek(ADRENO_HFI_V2, HFI_QUEUE_WORDS, read, queue->write,
+		    message[0], HFI_MESSAGE_WORDS, &words, &next_read);
+		padded = adreno_hfi_packet_words(ADRENO_HFI_V2, words);
+		if (packet_result != ADRENO_HFI_OK) {
+			printf("adreno: %u: malformed HFI v2 packet at queue %u word %u (header %#x, available %u)\n",
+			    step, which, read, message[0], available);
+			*malformed = true;
+			return false;
+		}
+		for (uint32_t i = 1; i < words; i++) {
 			at = (at + 1) % HFI_QUEUE_WORDS;
+			message[i] = data[at];
 		}
-		queue->read = (at + 3) / 4 * 4 % HFI_QUEUE_WORDS;
-		if ((message[0] >> 16 & 0xf) == HFI_ANSWER && message[1] >> 20 == number) {
-			*verdict = message[2];
-			answered = true;
-		} else {
-			message[7] = 0;
-			if ((message[0] & 0xff) == HFI_ERROR) {         /* vendor's adreno_a6xx_receive_err_req */
-				printf("adreno: %u: THE GMU REPORTS AN ERROR: %u, %u, \"%s\"\n", step, message[1] >> 16,
-				    message[1] & 0xffff, (const char *)&message[2]);
-			} else {
-				printf("adreno: %u: the GMU says (queue %u, %u words): %#x %#x %#x %#x %#x %#x\n", step, which, words,
-				    message[0], message[1], message[2], message[3], message[4], message[5]);
+		at = next_read;
+		if (fields.type == ADRENO_HFI_V2_ACK) {
+			uint32_t status = 0;
+			enum adreno_hfi_result result = adreno_hfi_ack(ADRENO_HFI_V2, message, padded, command, &status);
+			if (result == ADRENO_HFI_PARTIAL || result == ADRENO_HFI_INVALID) {
+				printf("adreno: %u: malformed HFI acknowledgement at queue %u word %u\n", step, which, read);
+				*malformed = true;
+				return false;
 			}
+			if (result == ADRENO_HFI_OK || result == ADRENO_HFI_STATUS) {
+				*verdict = status;
+				answered = true;
+			}
+		} else if (fields.id == HFI_ERROR) {
+			message[7] = 0;                         /* bound the diagnostic string */
+			printf("adreno: %u: THE GMU REPORTS AN ERROR: %u, %u, \"%s\"\n", step, message[1] >> 16,
+			    message[1] & 0xffff, (const char *)&message[2]);
+		} else {
+			printf("adreno: %u: the GMU says (queue %u, %u words): %#x %#x %#x %#x %#x %#x\n", step, which, words,
+			    message[0], message[1], message[2], message[3], message[4], message[5]);
 		}
-		if (words == 0) {
+		/* Commit only after the entire packet has been copied and checked. */
+		queue->read = at;
+		used -= padded;
+		if (answered) {
 			break;
 		}
 	}
@@ -2197,18 +2258,33 @@ hfi_send(const char *what, uint32_t id, uint32_t *message, uint32_t words)
 {
 	volatile struct hfi_queue *queue = &hfi->queue[0];
 	volatile uint32_t *data = (volatile uint32_t *)((vm_offset_t)hfi + HFI_QUEUE_AT(0));
-	uint32_t at = queue->write % HFI_QUEUE_WORDS, number = ++hfi_number & 0xfff, verdict = 0, waiting = 0;
-	bool answered = false;
+	uint32_t number = (hfi_number + 1) & 0xfff, verdict = 0, waiting = 0, padded, free_words;
+	uint32_t command;
+	bool answered = false, malformed = false;
+	enum adreno_hfi_result space;
 
-	message[0] = id | words << 8 | number << 20;
+	if (words == 0 || words > 255 || queue->status != 1 || queue->words != HFI_QUEUE_WORDS ||
+	    !adreno_hfi_queue_valid(ADRENO_HFI_V2, hfi->active_queues, 0, queue->type,
+	    queue->words, queue->read, queue->write) ||
+	    (padded = adreno_hfi_packet_words(ADRENO_HFI_V2, words)) == 0 ||
+	    (space = adreno_hfi_ring_space(HFI_QUEUE_WORDS, queue->read, queue->write, padded, &free_words)) != ADRENO_HFI_OK) {
+		printf("adreno: %u: invalid/full HFI v2 command queue for %s (%u words)\n", step, what, words);
+		return false;
+	}
+
+	command = adreno_hfi_header(id, words, ADRENO_HFI_CMD, number);
+	message[0] = command;
 	printf("adreno: %u: about to send the GMU %s: message %u, %u words, number %u\n", step, what, id, words, number);
 	snprintf(last_write, sizeof(last_write), "step %u sent the GMU message %u (%s)", step, id, what);
 	hold(true);
-	for (uint32_t i = 0; i < (words + 3) / 4 * 4; i++) {
-		data[at] = i < words ? message[i] : 0xfafafafa;
-		at = (at + 1) % HFI_QUEUE_WORDS;
+	space = adreno_hfi_ring_write(ADRENO_HFI_V2, data, HFI_QUEUE_WORDS, &queue->read, &queue->write,
+	    message, words, 0xfafafafa);
+	if (space != ADRENO_HFI_OK) {
+		hold(false);
+		printf("adreno: %u: HFI command queue changed before publish (%d)\n", step, space);
+		return false;
 	}
-	queue->write = at;
+	hfi_number = number;
 	settle();
 	wr(gmu.base + GMU_HOST2GMU_INTR_SET, 1);
 	for (int i = 0; i < 10000 && !answered; i++) {
@@ -2216,13 +2292,22 @@ hfi_send(const char *what, uint32_t id, uint32_t *message, uint32_t words)
 		waiting = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
 		if (waiting & 1) {
 			wr(gmu.base + GMU_GMU2HOST_INTR_CLR, 1);
-			answered = hfi_receive(1, number, &verdict);
+			answered = hfi_receive(1, command, &verdict, &malformed);
+			if (malformed) {
+				break;
+			}
 		}
 		if (rd(gmu.base + GMU_CM3_FW_INIT_RESULT) & GMU_FAILED) {
 			break;
 		}
 	}
-	hfi_receive(2, ~0u, &waiting);
+	{
+		bool debug_malformed;
+		hfi_receive(2, 0, &waiting, &debug_malformed);
+		if (debug_malformed) {
+			printf("adreno: %u: malformed HFI debug queue packet\n", step);
+		}
+	}
 	if (!answered || verdict != 0) {
 		printf("adreno: %u: the GMU %s (%#x) to %s; fw_init_result %#x, gmu2host_intr_info %#x\n", step,
 		    answered ? "says no" : "does not answer", verdict, what, rd(gmu.base + GMU_CM3_FW_INIT_RESULT),
@@ -2556,6 +2641,7 @@ static bool
 step_core_space(void)
 {
 	const uint8_t *microcode;
+	struct adreno_sqe_view sqe;
 	uint64_t size = 0;
 	uint32_t stream1 = 1;
 
@@ -2565,13 +2651,13 @@ step_core_space(void)
 	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
 	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
 	microcode = image_file("fw", "a660_sqe.fw", &size);
-	if (microcode == NULL || size < 8 || size > 0x40000 ||
+	if (!adreno_sqe_code(microcode, size, 0x40000, &sqe) ||
 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
-	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
+	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)sqe.bytes, PTE_CORE | PTE_READ_ONLY) ||
 	    !block_new(&core_space, &core_scratch, CORE_SCRATCH_ADDRESS, 4096, PTE_CORE)) {
 		return false;
 	}
-	memcpy((void *)core_sqe.memory, microcode + 4, size - 4);       /* the file's first word is not microcode */
+	memcpy((void *)core_sqe.memory, sqe.code, sqe.bytes);       /* the file's first word is not microcode */
 	to_memory(core_sqe.memory, core_sqe.size);
 
 	announce("give the SMMU's context 0 these tables and send the 3D core's requests (stream 0) through it");
@@ -3992,7 +4078,7 @@ start_by_itself(void)
 	const char *missing = NULL;
 	uint64_t size;
 
-	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
+	if (!hackios_platform_is("redwood") || pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
 		printf("adreno: THE GPU IS NOT STARTED: gpu=1 is for the phone, and this is not it\n");
 		return false;
 	}
@@ -4028,6 +4114,16 @@ redwood_adreno_init(void)
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
 
+	/* Cover diagnostic steps and display_probe too: both access redwood's
+	 * registers even when automatic gpu=1 startup was not requested. */
+	if (!hackios_platform_is("redwood") || pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
+		if ((PE_parse_boot_argn("gpu", &only, sizeof(only)) && only) ||
+		    (PE_parse_boot_argn("adreno", &only, sizeof(only)) && only) ||
+		    (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only)) {
+			printf("adreno: board profile does not match redwood; no GPU/display registers accessed\n");
+		}
+		return;
+	}
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
 		display_probe();
 	}

@@ -17,14 +17,18 @@
  * another network -- as iOS itself rejoins the networks it knows. If that other network cannot
  * be joined (a wrong passphrase), the standing one is joined again.
  */
+#include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
+#include <pexpert/pexpert.h>
 #include <sys/errno.h>
+#include <sys/hackios_platform.h>
 #include <sys/redwood_input.h>
+#include <sys/redwood_net.h>
 #include <sys/redwood_sta.h>
 #include <sys/systm.h>
 
@@ -368,4 +372,215 @@ redwood_sta_address(uint8_t *address)
 		memcpy(address, ops->address, 6);
 	}
 	return ops != NULL;
+}
+
+/* ---- QEMU's synthetic station ------------------------------------------------------------------------- */
+
+/*
+ * There is no WCN3990 behind QEMU's virt machine, so this backend answers the Apple80211 side as one
+ * access point would: it advertises "HackiOS-QEMU" (open, 2.4 GHz channel 1) and accepts a join for
+ * that name. Frames are not touched here: they go over the virtio-net link that redwood_virtio_net.c
+ * has already attached, and redwood_net_link_state() lets configd start DHCP once the join is done.
+ * It is compiled for every kernel but runs only with boot-arg wifi_qemu=1 on the qemu-virt profile.
+ */
+#define QEMU_STATION_SSID        "HackiOS-QEMU"
+#define QEMU_STATION_SSID_LENGTH 11
+
+static const uint8_t qemu_station_bssid[6] = { 0x02, 0x48, 0x41, 0x43, 0x4b, 0x01 };
+
+static struct redwood_sta_bss qemu_station_bss;
+static struct redwood_sta_state qemu_station_status;
+static bool qemu_station_started;
+static bool qemu_station_on;
+static bool qemu_station_heard_any;
+
+static void
+qemu_station_phase(enum redwood_sta_phase phase, int error)
+{
+	lck_mtx_lock(&sta_lock);
+	qemu_station_status.phase = phase;
+	qemu_station_status.last_error = error;
+	if (phase == REDWOOD_STA_JOINED) {
+		qemu_station_status.bss = qemu_station_bss;
+	} else if (phase == REDWOOD_STA_OFF || phase == REDWOOD_STA_IDLE) {
+		bzero(&qemu_station_status.bss, sizeof(qemu_station_status.bss));
+	}
+	lck_mtx_unlock(&sta_lock);
+}
+
+static int
+qemu_station_power(bool on)
+{
+	lck_mtx_lock(&sta_lock);
+	qemu_station_on = on;
+	lck_mtx_unlock(&sta_lock);
+	redwood_net_link_state(false);
+	qemu_station_phase(on ? REDWOOD_STA_IDLE : REDWOOD_STA_OFF, 0);
+	if (!on) {
+		printf("qemu-wifi: radio off\n");
+	}
+	return 0;
+}
+
+static int
+qemu_station_scan(const struct redwood_sta_scan *what)
+{
+	bool match = what == NULL || what->ssid_length == 0 ||
+	    (what->ssid_length == QEMU_STATION_SSID_LENGTH &&
+	    memcmp(what->ssid, QEMU_STATION_SSID, QEMU_STATION_SSID_LENGTH) == 0);
+	enum redwood_sta_phase before;
+
+	lck_mtx_lock(&sta_lock);
+	before = qemu_station_status.phase == REDWOOD_STA_JOINED ? REDWOOD_STA_JOINED : REDWOOD_STA_IDLE;
+	lck_mtx_unlock(&sta_lock);
+	qemu_station_phase(REDWOOD_STA_SCANNING, 0);
+	/* (a radio needs a little while on each channel; this is one channel) */
+	delay_for_interval(what != NULL && what->dwell_ms != 0 ? what->dwell_ms : 120, NSEC_PER_MSEC);
+	lck_mtx_lock(&sta_lock);
+	qemu_station_heard_any = match;
+	qemu_station_bss.age_ms = 0;
+	lck_mtx_unlock(&sta_lock);
+	qemu_station_phase(before, 0);
+	printf("qemu-wifi: scan of channel 1 heard %s\n", match ? "\"" QEMU_STATION_SSID "\"" : "nothing");
+	return 0;
+}
+
+static void
+qemu_station_heard(void (*each)(const struct redwood_sta_bss *bss, void *context), void *context)
+{
+	struct redwood_sta_bss bss;
+	bool there;
+
+	lck_mtx_lock(&sta_lock);
+	there = qemu_station_heard_any;
+	bss = qemu_station_bss;
+	lck_mtx_unlock(&sta_lock);
+	if (there) {
+		each(&bss, context);
+	}
+}
+
+static int
+qemu_station_join(const struct redwood_sta_join *what)
+{
+	bool bssid_given = false;
+
+	if (!qemu_station_on) {
+		return ENETDOWN;
+	}
+	if (what == NULL || what->ssid_length != QEMU_STATION_SSID_LENGTH ||
+	    memcmp(what->ssid, QEMU_STATION_SSID, QEMU_STATION_SSID_LENGTH) != 0) {
+		printf("qemu-wifi: join refused: the synthetic station has no such network\n");
+		return ENXIO;
+	}
+	for (unsigned i = 0; i < sizeof(what->bssid); i++) {
+		bssid_given |= what->bssid[i] != 0;
+	}
+	if (bssid_given && memcmp(what->bssid, qemu_station_bssid, sizeof(qemu_station_bssid)) != 0) {
+		return ENXIO;
+	}
+	if (what->security != REDWOOD_STA_OPEN) {
+		printf("qemu-wifi: join refused: \"%s\" is advertised open\n", QEMU_STATION_SSID);
+		return EAUTH;
+	}
+	/* (association takes a moment on a radio) */
+	delay_for_interval(80, NSEC_PER_MSEC);
+	qemu_station_phase(REDWOOD_STA_JOINED, 0);
+	redwood_net_link_state(true);
+	printf("qemu-wifi: joined \"%s\" (synthetic station; frames go over virtio-net)\n", QEMU_STATION_SSID);
+	return 0;
+}
+
+static int
+qemu_station_leave(void)
+{
+	qemu_station_phase(REDWOOD_STA_IDLE, 0);
+	redwood_net_link_state(false);
+	printf("qemu-wifi: left \"%s\"\n", QEMU_STATION_SSID);
+	return 0;
+}
+
+static void
+qemu_station_state(struct redwood_sta_state *state)
+{
+	lck_mtx_lock(&sta_lock);
+	*state = qemu_station_status;
+	lck_mtx_unlock(&sta_lock);
+}
+
+static unsigned
+qemu_station_channels(struct redwood_sta_channel *channels, unsigned most)
+{
+	static const uint16_t frequencies[] = { 2412, 2437, 2462, 5180 };
+	unsigned count = (unsigned)(sizeof(frequencies) / sizeof(frequencies[0]));
+
+	if (count > most) {
+		count = most;
+	}
+	for (unsigned i = 0; i < count; i++) {
+		channels[i].frequency = frequencies[i];
+		channels[i].flags = 0;
+	}
+	return count;
+}
+
+static const struct redwood_sta_ops qemu_station_ops = {
+	.power = qemu_station_power,
+	.scan = qemu_station_scan,
+	.heard = qemu_station_heard,
+	.join = qemu_station_join,
+	.leave = qemu_station_leave,
+	.state = qemu_station_state,
+	.channels = qemu_station_channels,
+	.address = { 0x02, 0x48, 0x41, 0x43, 0x4b, 0x02 },
+};
+
+void
+redwood_sta_qemu_start(void)
+{
+	struct redwood_sta_join join;
+	uint32_t enabled = 0;
+
+	if (qemu_station_started) {
+		return;
+	}
+	if (!hackios_platform_is("qemu-virt") ||
+	    !PE_parse_boot_argn("wifi_qemu", &enabled, sizeof(enabled)) || enabled == 0) {
+		return;
+	}
+	qemu_station_started = true;
+
+	bzero(&qemu_station_bss, sizeof(qemu_station_bss));
+	memcpy(qemu_station_bss.bssid, qemu_station_bssid, sizeof(qemu_station_bss.bssid));
+	memcpy(qemu_station_bss.ssid, QEMU_STATION_SSID, QEMU_STATION_SSID_LENGTH);
+	qemu_station_bss.ssid_length = QEMU_STATION_SSID_LENGTH;
+	qemu_station_bss.frequency = 2412;
+	qemu_station_bss.rssi = -42;
+	qemu_station_bss.beacon_interval = 100;
+	qemu_station_bss.capability = 0x0421;           /* ESS, short preamble, short slot: an open network */
+	/* rates (1) and the channel (3), so that iOS shows the band and the basic rates */
+	qemu_station_bss.elements[0] = 1;
+	qemu_station_bss.elements[1] = 4;
+	qemu_station_bss.elements[2] = 0x82;
+	qemu_station_bss.elements[3] = 0x84;
+	qemu_station_bss.elements[4] = 0x8b;
+	qemu_station_bss.elements[5] = 0x96;
+	qemu_station_bss.elements[6] = 3;
+	qemu_station_bss.elements[7] = 1;
+	qemu_station_bss.elements[8] = 1;
+	qemu_station_bss.elements_length = 9;
+	qemu_station_phase(REDWOOD_STA_OFF, 0);
+
+	redwood_sta_attach(&qemu_station_ops);
+	qemu_station_on = true;
+
+	bzero(&join, sizeof(join));
+	memcpy(join.ssid, QEMU_STATION_SSID, QEMU_STATION_SSID_LENGTH);
+	join.ssid_length = QEMU_STATION_SSID_LENGTH;
+	join.security = REDWOOD_STA_OPEN;
+	if (redwood_sta_ask_join_standing(&join) != 0) {
+		printf("qemu-wifi: the station thread did not take the join\n");
+		return;
+	}
+	printf("qemu-wifi: synthetic station up: \"" QEMU_STATION_SSID "\", open, channel 1; not WCN3990\n");
 }

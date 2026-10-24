@@ -96,6 +96,13 @@ enum redwood_sta_event {
 #ifdef KERNEL
 /* ---- the station side ---- */
 void     redwood_sta_attach(const struct redwood_sta_ops *ops);         /* NULL: it is going away (waits for a call under way) */
+/*
+ * QEMU only: a synthetic station for the virtio-net link (boot-arg wifi_qemu=1).
+ * It advertises and joins "HackiOS-QEMU", and its link state is the virtio link's.
+ * This is emulation, not a WCN3990 driver; the phone's station is ath11k (redwood_lx.c).
+ */
+void     redwood_sta_qemu_start(void);
+
 void     redwood_sta_lost(int error);                                   /* the network joined is gone by itself */
 
 /* ---- who wants a network: each asks and returns; the outcome is an event. 0, or an errno ---- */

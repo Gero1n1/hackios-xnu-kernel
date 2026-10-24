@@ -1,0 +1,12 @@
+diff --git a/Platforms/Xiaomi/sweet_k6aPkg/Library/MemoryMapLib/MemoryMapLib.c b/Platforms/Xiaomi/sweet_k6aPkg/Library/MemoryMapLib/MemoryMapLib.c
+--- a/Platforms/Xiaomi/sweet_k6aPkg/Library/MemoryMapLib/MemoryMapLib.c
++++ b/Platforms/Xiaomi/sweet_k6aPkg/Library/MemoryMapLib/MemoryMapLib.c
+@@ -9,6 +9,6 @@ gMemoryDescriptor[] = {
+   {"AOP CMD DB",        0x85F20000, 0x00020000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
+   {"SMEM",              0x86000000, 0x00200000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
+-  {"PIL Reserved",      0x8AB00000, 0x0CB00000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
+-  {"DXE Heap",          0x97700000, 0x04500000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
++  {"PIL Reserved",      0x8AB00000, 0x0D500000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
++  {"DXE Heap",          0x98000000, 0x03C00000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
+   {"Sched Heap",        0x9BC00000, 0x00400000, AddMem, SYS_MEM, SYS_MEM_CAP, BsData, WRITE_BACK_XN},
+   {"Display Reserved",  0x9C000000, 0x01800000, AddMem, MEM_RES, SYS_MEM_CAP, Reserv, WRITE_THROUGH_XN},

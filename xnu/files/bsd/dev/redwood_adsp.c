@@ -113,6 +113,7 @@ extern lck_mtx_t redwood_smem_alloc_lock;
 static LCK_GRP_DECLARE(adsp_lock_group, "redwood-adsp");
 
 #define STEPS                   11
+#include <sys/hackios_platform.h>
 #define REDWOOD_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
@@ -3202,7 +3203,7 @@ redwood_adsp_init(void)
 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
 		return;
 	}
-	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
+	if (!hackios_platform_is("redwood") || pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
 		return;
 	}
