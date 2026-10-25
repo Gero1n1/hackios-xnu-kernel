@@ -43,6 +43,25 @@ jobs:
           cd Mu-Silicium
           python3 build_uefi.py -d sweet_k6a -r RELEASE
           python3 build_uefi.py -d sweet_k6a -r DEBUG
+      - name: Use the real Qualcomm display driver (sweet)
+        run: |
+          # ABL blanks the panel when jumping to a non-Android image on this
+          # handset, so SimpleFbDxe (draw-only) leaves the screen dead. Switch
+          # to the binary DisplayDxe, which re-initializes the whole panel
+          # path from the device tree (the fdf already wires it under this
+          # same flag, together with CPRDxe).
+          python3 - <<'EOF'
+          import re
+          p = 'Mu-Silicium/Platforms/Xiaomi/sweet_k6aPkg/sweet_k6a.dsc'
+          s = open(p).read()
+          if re.search(r'^\s*USE_CUSTOM_DISPLAY_DRIVER\s*=', s, re.M):
+              s = re.sub(r'^(\s*USE_CUSTOM_DISPLAY_DRIVER\s*=\s*)\S+.*$', r'\g<1>1', s, flags=re.M)
+              print('USE_CUSTOM_DISPLAY_DRIVER set to 1 (replaced)')
+          else:
+              s = s.replace('PLATFORM_NAME', 'USE_CUSTOM_DISPLAY_DRIVER      = 1\n  PLATFORM_NAME', 1)
+              print('USE_CUSTOM_DISPLAY_DRIVER = 1 inserted')
+          open(p, 'w').write(s)
+          EOF
       - name: Disable the APSS watchdog in BootShim (sweet)
         run: |
           python3 - <<'EOF'
