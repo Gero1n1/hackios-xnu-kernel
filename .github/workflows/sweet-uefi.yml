@@ -37,11 +37,12 @@ jobs:
         run: |
           python3 -m venv venv
           venv/bin/pip install -r Mu-Silicium/pip-requirements.txt
-      - name: Build the sweet_k6a UEFI (RELEASE)
+      - name: Build the sweet_k6a UEFI (RELEASE and DEBUG)
         run: |
           source venv/bin/activate
           cd Mu-Silicium
           python3 build_uefi.py -d sweet_k6a -r RELEASE
+          python3 build_uefi.py -d sweet_k6a -r DEBUG
       - name: Disable the APSS watchdog in BootShim (sweet)
         run: |
           python3 - <<'EOF'
@@ -93,7 +94,9 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts
-          find Mu-Silicium/Build -type f \( -name 'SILICIUM_UEFI.fd' -o -iname '*BootShim*' \) -exec cp {} artifacts/ \; || true
+          find Mu-Silicium/Build -type f -iname '*BootShim*' -exec cp {} artifacts/ \; || true
+          cp Mu-Silicium/Build/sweet_k6aPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd artifacts/SILICIUM_UEFI-RELEASE.fd 2>/dev/null || true
+          cp Mu-Silicium/Build/sweet_k6aPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd artifacts/SILICIUM_UEFI-DEBUG.fd 2>/dev/null || true
           cp artifacts-loader.efi artifacts/ 2>/dev/null || true
           cp sweet-boot.img payload.bin artifacts/ 2>/dev/null || true
           ls -la artifacts
