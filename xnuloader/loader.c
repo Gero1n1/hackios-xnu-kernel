@@ -3996,8 +3996,21 @@ efi_main(efi_handle image, efi_system_table *st)
 		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
 			if (platforms[i]->fb_base == SCREEN.base)
 				PLAT = platforms[i];
-		if (PLAT == &platform_qemu_virt)
-			ramfb_phone_screen();
+		if (PLAT == &platform_qemu_virt) {
+			/* QEMU's firmware puts the GOP framebuffer at a dynamic RAM
+			 * address that matches no platform table, and ramfb rebuilds it
+			 * in the phone's shape. On a real phone an unmatched address
+			 * only means this table is wrong -- and ramfb would poke the
+			 * emulator's fw_cfg MMIO (0x09020000), which is unmapped device
+			 * space on the handset and aborts the bus into a warm reset.
+			 * Only an ARM-implemented core (QEMU's cpu models, 0x41) can be
+			 * the emulator; phones report their vendor's implementer. */
+			uint64_t midr = READ_SYSREG(MIDR_EL1);
+			if (((midr >> 24) & 0xff) == 0x41)
+				ramfb_phone_screen();
+			else
+				print("unmatched framebuffer %x: keeping the firmware display\n", SCREEN.base);
+		}
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
