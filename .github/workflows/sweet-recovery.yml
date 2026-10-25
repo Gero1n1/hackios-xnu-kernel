@@ -1,0 +1,60 @@
+name: sweet dev recovery (DEVMEM)
+on:
+  workflow_dispatch:
+  push:
+    branches: [sweet-port]
+    paths: ['.github/workflows/sweet-recovery.yml', 'tools/devrecovery/**']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm gcc-aarch64-linux-gnu flex bison bc libssl-dev cpio unzip wget python3
+      - name: Fetch the stock OrangeFox recovery for sweet
+        run: |
+          curl -sL -o ofox.zip https://github.com/basamaryan/android_device_xiaomi_sweet-TWRP/releases/download/R11.1_7/OrangeFox-R11.1_7-Unofficial-sweet.zip
+          unzip -o ofox.zip -d ofox
+          find ofox -name 'recovery.img' -o -name 'OrangeFox*.img' | tee imgs.txt
+          RECOVERY=$(head -1 imgs.txt)
+          cp "$RECOVERY" recovery.img
+          python3 -c "d=open('recovery.img','rb').read(8); print('boot magic:', d); assert d==b'ANDROID!'"
+      - name: Clone the LineageOS sm6150 kernel
+        run: |
+          git clone --depth 1 -b lineage-22.2 https://github.com/LineageOS/android_kernel_xiaomi_sm6150 kernel || \
+            git clone --depth 1 https://github.com/LineageOS/android_kernel_xiaomi_sm6150 kernel
+          cd kernel && git log -1 --oneline
+      - name: Configure (Lineage defconfig + sweet fragment + DEVMEM)
+        run: |
+          cd kernel
+          make O=out ARCH=arm64 vendor/sdmsteppe-perf_defconfig
+          ./scripts/kconfig/merge_config.sh -m out/.config arch/arm64/configs/vendor/sweet.config
+          ./scripts/config --file out/.config -e DEVMEM -d STRICT_DEVMEM -e PROC_KCORE
+          make O=out ARCH=arm64 olddefconfig
+          grep -E 'CONFIG_DEVMEM|CONFIG_STRICT_DEVMEM|CONFIG_PROC_KCORE' out/.config
+      - name: Build the kernel (clang, gcc fallback)
+        run: |
+          cd kernel
+          make O=out ARCH=arm64 -j"$(nproc)" \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
+            CROSS_COMPILE=aarch64-linux-gnu- Image.gz || \
+          make O=out ARCH=arm64 -j"$(nproc)" CROSS_COMPILE=aarch64-linux-gnu- Image.gz
+          ls -la out/arch/arm64/boot/Image.gz
+      - name: Repack the recovery with the new kernel
+        run: |
+          python3 tools/devrecovery/repack-recovery.py recovery.img \
+            kernel/out/arch/arm64/boot/Image.gz sweet-devrecovery.img
+          sha256sum sweet-devrecovery.img
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sweet-devrecovery
+          path: |
+            sweet-devrecovery.img
+            recovery.img
