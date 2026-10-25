@@ -46,6 +46,13 @@ jobs:
           EOF
       - name: "Build the shim (diagnostics ramdisk, no payload)"
         run: |
+          # Ubuntu's mkbootimg package is broken (missing its gki module);
+          # use the repo's own AOSP mkbootimg.py through a PATH wrapper.
+          sudo apt-get remove -y mkbootimg || true
+          mkdir -p "$HOME/.local/bin"
+          printf '#!/usr/bin/env bash\nexec python3 "%s/prebuilt/uefi/mkbootimg.py" "$@"\n' \
+            "$GITHUB_WORKSPACE" > "$HOME/.local/bin/mkbootimg"
+          chmod +x "$HOME/.local/bin/mkbootimg"
           cd dipa/shim
           # The host_test step needs an x86 display dump; harmless to skip.
           sed -i '/host_test/d' build.sh
