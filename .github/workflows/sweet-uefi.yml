@@ -42,6 +42,27 @@ jobs:
           source venv/bin/activate
           cd Mu-Silicium
           python3 build_uefi.py -d sweet_k6a -r RELEASE
+      - name: Disable the APSS watchdog in BootShim (sweet)
+        run: |
+          python3 - <<'EOF'
+          p = 'Mu-Silicium/BootShim/BootShim.S'
+          s = open(p).read()
+          i = s.index('_Start:')
+          j = s.index('\n', i) + 1
+          ins = ('  /* HACKIOS sweet: ABL arms the APSS watchdog; a UEFI boot never pets\n'
+                 '     it and the phone resets about 10 s in. Disable it first:\n'
+                 '     WDT0_EN (+0x08) = 0, layout from the pinned OEM watchdog_v2.c\n'
+                 '     wdog_disable(). */\n'
+                 '  ldr   x17, =0x17C10000\n'
+                 '  str   wzr, [x17, #8]\n'
+                 '  dsb   sy\n')
+          if '0x17C10000' not in s:
+              s = s[:j] + ins + s[j:]
+              open(p, 'w').write(s)
+              print('BootShim patched: APSS watchdog disable inserted at _Start')
+          else:
+              print('BootShim already patched')
+          EOF
       - name: Build the XNU loader
         run: |
           bash xnuloader/build.sh
