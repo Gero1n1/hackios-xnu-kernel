@@ -15,7 +15,7 @@
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
 
-#define PAYLOAD_BASE        0xF0000000ULL
+#define PAYLOAD_BASE        0x81000000ULL
 #define PAYLOAD_MAGIC       0x50554E58u /* "XNUP" */
 
 struct payload_header { uint32_t magic; uint32_t size; };
@@ -523,6 +523,7 @@ struct platform {
 	int cores;                       /* at most this many processor cores, numbered from 0 ... */
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
+	uint32_t ticket_timeout_scale;   /* extra scale for the ticket lock alone, 0: no extra scale */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
 	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
 };
@@ -534,9 +535,15 @@ static const struct platform platform_qemu_virt = {
 	/*
 	 * QEMU's emulated cores stop each other all the time (every flush of a page from all the
 	 * TLBs is a rendezvous of all its CPU threads), and the kernel's patience with a spin lock
-	 * is that of real hardware: an eighth of a second by a 24 MHz clock, a twentieth here.
+	 * is that of real hardware: an eighth of a second by a 24 MHz clock. A first four-CPU run
+	 * still timed out after 84,354,243 ticks against the 20x (60,000,000-tick) limit while the
+	 * pset lock sat in the documented acquire/unlock owner window. Keep 20x for the other
+	 * machine timeouts. The current kernel does not consume a separate ticket-lock scale
+	 * from this node; run_qemu.py passes tlto_us=25000000, which
+	 * ml_init_lock_timeout() reads. The property below is kept for a kernel that implements
+	 * it, but it is not the effective QEMU ticket timeout. Real hardware emits neither scale.
 	 */
-	.timeout_scale = 20,
+	.timeout_scale = 20, .ticket_timeout_scale = 10,
 };
 
 static const struct platform platform_redwood = {
@@ -553,6 +560,24 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_sweet = {
+	/* SM7125 (sdmmagpie), Redmi Note 10 Pro: values from the pinned OEM device
+	 * tree, see docs/SWEET-LOADER-FACTS.md. io_base must be non-zero (XNU
+	 * skips clock setup otherwise); the window ends past the GIC
+	 * redistributor (0x17A60000 + 0x100000), covering the peripherals we
+	 * describe and nothing above. */
+	.name = "sweet", .io_base = 0x00400000, .io_size = 0x17C00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	/* CPUs 0-5 are the Kryo 560 Silvers (Cortex-A55, capacity-dmips-mhz 1024),
+	 * 6-7 the Golds (A76, 1740): the same little-first policy as redwood. */
+	.small_cores = 0x3f,
+	/* The sweet_k6a UEFI's simple framebuffer lives in the SoC map's Display
+	 * Reserved region (0x9C000000). HYPOTHESIS until the loader's own
+	 * "display W x H at ..." line on the handset confirms or corrects it. */
+	.fb_base = 0x9C000000,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -560,6 +585,7 @@ static const struct platform platform_redwood = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_sweet,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -3053,6 +3079,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	dt_begin(&w, "chosen");
+	dt_prop_str(&w, "hackios-platform", plat->name);
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);
@@ -3119,6 +3146,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		/* multiplies every "machine timeout" of the kernel (machine_timeout_init_with_suffix()) */
 		dt_begin(&w, "machine-timeouts");
 		dt_prop_u32(&w, "global-scale", plat->timeout_scale);
+		if (plat->ticket_timeout_scale != 0) {
+			/* the ticket lock gets this extra factor on top of global-scale */
+			dt_prop_u32(&w, "ticket-lock-scale", plat->ticket_timeout_scale);
+		}
 		dt_end(&w);
 	}
 	dt_end(&w);
@@ -3846,6 +3877,11 @@ usb_command_loop(void)
  */
 #define PHONE_WIDTH     1125            /* the screen of the iPhone X, whose identity we carry */
 #define PHONE_HEIGHT    2436
+/* HACKIOS_RAMFB_HEIGHT: QEMU's ramfb refuses a mode taller than 2048 (bochs-vbe's
+ * VBE_DISPI_MAX_YRES), so the panel is asked for 2048 rows and the kernel scales the
+ * 1125x2436 display into it -- the same thing it does on a real phone. Upstream fix
+ * a5863ff51a5250538308b99168f3a00cd4ac645c, hand-merged onto our polled-DMA version. */
+#define RAMFB_HEIGHT    2048
 #define FW_CFG_BASE     0x09020000ULL   /* QEMU virt: data at +0, selector at +8, DMA address at +16 */
 #define FW_CFG_FILE_DIR 0x19
 #define FW_CFG_DMA_SELECT 0x08
@@ -3872,7 +3908,7 @@ ramfb_phone_screen(void)
 		uint64_t addr;
 		uint32_t fourcc, flags, width, height, stride;
 	} __attribute__((packed)) cfg;
-	static struct {
+	static volatile struct {
 		uint32_t control, length;
 		uint64_t address;
 	} dma;
@@ -3882,7 +3918,7 @@ ramfb_phone_screen(void)
 		char name[56];
 	} file;
 	uint32_t count, select = 0;
-	uint64_t fb = 0, bytes = (uint64_t)PHONE_WIDTH * 4 * PHONE_HEIGHT;
+	uint64_t fb = 0, bytes = (uint64_t)PHONE_WIDTH * 4 * RAMFB_HEIGHT;
 
 	*(volatile uint16_t *)(FW_CFG_BASE + 8) = __builtin_bswap16(FW_CFG_FILE_DIR);
 	fw_cfg_read(&count, sizeof(count));
@@ -3901,19 +3937,35 @@ ramfb_phone_screen(void)
 	cfg.fourcc = be32(0x34325258);          /* 'XR24': blue, green, red, unused */
 	cfg.flags = 0;
 	cfg.width = be32(PHONE_WIDTH);
-	cfg.height = be32(PHONE_HEIGHT);
+	cfg.height = be32(RAMFB_HEIGHT);
 	cfg.stride = be32(PHONE_WIDTH * 4);
 	dma.control = be32(select << 16 | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
 	dma.length = be32(sizeof(cfg));
 	dma.address = __builtin_bswap64((uint64_t)(uintptr_t)&cfg);
+	/* The device reads this descriptor and clears control through DMA. Make
+	 * stores visible before the doorbell and reload its completion, rather
+	 * than letting the compiler reuse the value we just stored. */
+	__asm__ volatile("dsb sy" ::: "memory");
 	*(volatile uint64_t *)(FW_CFG_BASE + 16) = __builtin_bswap64((uint64_t)(uintptr_t)&dma);
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (unsigned tries = 0; tries < 100000; tries++) {
+		uint32_t control = be32(dma.control);
+		if (control == 0 || (control & 1) != 0) {
+			break;
+		}
+		__asm__ volatile("yield" ::: "memory");
+	}
 	if (dma.control != 0) {
-		print("ramfb: control %x after the request\n", (uint64_t)be32(dma.control));
-		return;
+		/* HACKIOS: with the polled completion above this can still mean the
+		 * device kept an error bit; the mode it takes is the one in the panel.
+		 * Keep the requested 2048-row mode (never taller than bochs-vbe's
+		 * limit) so the kernel is not told a panel it does not have. */
+		print("ramfb: control %x after the request (the mode is taken as it stands)\n",
+		    (uint64_t)be32(dma.control));
 	}
 	SCREEN.base = fb;
 	SCREEN.width = PHONE_WIDTH;
-	SCREEN.height = PHONE_HEIGHT;
+	SCREEN.height = RAMFB_HEIGHT;
 	SCREEN.stride = PHONE_WIDTH * 4;
 }
 
@@ -3936,6 +3988,20 @@ efi_main(efi_handle image, efi_system_table *st)
 	if (EFI_ERROR(BS->locate_protocol(&gop_guid, NULL, (void **)&GOP)) || GOP->mode == NULL ||
 	    GOP->mode->info == NULL || GOP->mode->fb_base == 0) {
 		GOP = NULL;                     /* no display (QEMU without -device ramfb) */
+		/* On a real phone the panel keeps scanning the display the
+		 * bootloader lit (the fastboot logo) even when this UEFI never
+		 * publishes GOP. Draw straight into the SoC map's Display Reserved
+		 * region; if the live scanout uses another stride the text is
+		 * skewed but visible, which is the point. QEMU (an ARM-implemented
+		 * core) must keep its own ramfb path instead. */
+		uint64_t midr = READ_SYSREG(MIDR_EL1);
+		if (((midr >> 24) & 0xff) != 0x41) {
+			SCREEN.base = 0x9C000000;
+			SCREEN.width = 1080;
+			SCREEN.height = 2400;
+			SCREEN.stride = 1080 * 4;
+			print("no GOP: drawing into the display reserved region\n");
+		}
 	} else {
 		SCREEN.base = GOP->mode->fb_base;
 		SCREEN.width = GOP->mode->info->width;
@@ -3944,8 +4010,21 @@ efi_main(efi_handle image, efi_system_table *st)
 		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
 			if (platforms[i]->fb_base == SCREEN.base)
 				PLAT = platforms[i];
-		if (PLAT == &platform_qemu_virt)
-			ramfb_phone_screen();
+		if (PLAT == &platform_qemu_virt) {
+			/* QEMU's firmware puts the GOP framebuffer at a dynamic RAM
+			 * address that matches no platform table, and ramfb rebuilds it
+			 * in the phone's shape. On a real phone an unmatched address
+			 * only means this table is wrong -- and ramfb would poke the
+			 * emulator's fw_cfg MMIO (0x09020000), which is unmapped device
+			 * space on the handset and aborts the bus into a warm reset.
+			 * Only an ARM-implemented core (QEMU's cpu models, 0x41) can be
+			 * the emulator; phones report their vendor's implementer. */
+			uint64_t midr = READ_SYSREG(MIDR_EL1);
+			if (((midr >> 24) & 0xff) == 0x41)
+				ramfb_phone_screen();
+			else
+				print("unmatched framebuffer %x: keeping the firmware display\n", SCREEN.base);
+		}
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
@@ -3954,6 +4033,16 @@ efi_main(efi_handle image, efi_system_table *st)
 	wdt_arm();
 
 	int have_payload = parse_payload(&pi, 0);
+	/* HACKIOS sweet bring-up experiment (remove after the phone channel
+	 * works): checkpoint 777 parks the loader here forever. Black screen
+	 * that never reboots means this point is reached; the ~10 s warm
+	 * reset means it is not. */
+	if (have_payload && pi.checkpoint == 777) {
+		print("HANG1: loader reached its payload parse\n");
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
 	if (have_payload && pi.usb_mode && usb_start()) {
 		flush_log();
 		usb_command_loop();

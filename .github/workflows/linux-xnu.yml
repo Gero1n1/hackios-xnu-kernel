@@ -1,0 +1,79 @@
+name: Linux XNU source build
+on:
+  workflow_dispatch:
+  push:
+    branches: [sweet-port]
+    paths:
+      - '.github/workflows/linux-xnu.yml'
+      - 'tools/ci/**'
+      - 'xnu/**'
+      - 'xnu-deps/**'
+      - 'xnu-build.sh'
+      - 'xnu-env.sh'
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      THEOS: ${{ github.workspace }}/.ci-theos
+      JOBS: '4'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm lld flex bison m4 perl autoconf automake libtool-bin libxml2-dev libncurses-dev zlib1g-dev uuid-dev
+          command -v dsymutil
+      - name: Check board identity matching (C and C++)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/platform-test/test.c -o /tmp/platform-c
+          /tmp/platform-c
+          c++ -std=c++14 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/platform-test/test.c -o /tmp/platform-cpp
+          /tmp/platform-cpp
+          cc -std=c11 -Wall -Wextra -Werror -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-c
+          /tmp/gmu-c
+          c++ -std=c++14 -Wall -Wextra -Werror -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-cpp
+          /tmp/gmu-cpp
+          clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ixnu/files/bsd tools/gmu-test/test.c -o /tmp/gmu-ubsan
+          /tmp/gmu-ubsan
+          cc -std=c11 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/a618-test/test.c -o /tmp/a618-c
+          /tmp/a618-c
+          c++ -std=c++14 -Wall -Wextra -Werror -Itools/platform-test/include -Ixnu/files/bsd tools/a618-test/test.c -o /tmp/a618-cpp
+          /tmp/a618-cpp
+          clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Itools/platform-test/include -Ixnu/files/bsd tools/a618-test/test.c -o /tmp/a618-sanitized
+          /tmp/a618-sanitized
+      - name: Fetch pinned SDK and cross tools
+        run: bash tools/ci/setup-linux.sh
+      - name: Apply sources and build dependencies
+        run: |
+          bash xnu-deps/setup.sh --stage1
+          bash xnu/apply.sh
+          bash xnu-deps/setup.sh --stage2
+      - name: Build XNU (preserve the actual make result)
+        run: |
+          set -o pipefail
+          mkdir -p ci-results
+          ./xnu-build.sh -j4 -k 2>&1 | tee ci-results/kernel-build.log
+      - name: Collect available build evidence
+        if: always()
+        run: |
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/source-commit.txt
+          clang --version > ci-results/compiler.txt
+          find xnu-deps -maxdepth 1 -name '*.log' -exec cp '{}' ci-results/ \;
+          kernel=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          if test -s "$kernel"; then
+            cp "$kernel" ci-results/
+            sha256sum "$kernel" > ci-results/kernel.sha256
+          fi
+          if test -s "$kernel.unstripped"; then
+            xnu-deps/host/bin/nm -n "$kernel.unstripped" > ci-results/kernel.syms
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: linux-xnu-evidence
+          path: ci-results/
+          retention-days: 7

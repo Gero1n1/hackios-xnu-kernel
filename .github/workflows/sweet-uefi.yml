@@ -1,0 +1,131 @@
+name: sweet_k6a UEFI build
+on:
+  workflow_dispatch:
+  push:
+    branches: [sweet-port]
+    paths: ['uefi/**', 'xnuloader/**', 'mkxnuimg.py', '.github/workflows/sweet-uefi.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang llvm lld nasm gcc-aarch64-linux-gnu linux-libc-dev python3 python3-pip python3-venv
+          command -v nasm && command -v clang
+      - name: Clone Mu-Silicium at the pinned base
+        run: |
+          git clone https://github.com/Project-Silicium/Mu-Silicium.git Mu-Silicium
+          git -C Mu-Silicium checkout -q "$(cat uefi/BASE)"
+          git -C Mu-Silicium submodule update --init --recursive
+      - name: Apply the port and the sweet memory map
+        run: |
+          git -C Mu-Silicium apply --whitespace=nowarn "$PWD/uefi/mu-silicium.patch"
+          cp -r uefi/files/. Mu-Silicium/
+          git -C Mu-Silicium apply --whitespace=nowarn "$PWD/uefi/sweet-memory.patch"
+      - name: Use the system nasm instead of the NuGet extdep
+        run: |
+          D=Mu-Silicium/Mu_Basecore/BaseTools/Bin/mu_nasm_extdep
+          mkdir -p $D/Linux-x86-64
+          echo 'version: 20016.1.1' > $D/extdep_state.yaml
+          ln -s /usr/bin/nasm /usr/bin/ndisasm $D/Linux-x86-64/
+      - name: Set up the python environment
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -r Mu-Silicium/pip-requirements.txt
+      - name: Build the sweet_k6a UEFI (RELEASE and DEBUG)
+        run: |
+          source venv/bin/activate
+          cd Mu-Silicium
+          python3 build_uefi.py -d sweet_k6a -r RELEASE
+          python3 build_uefi.py -d sweet_k6a -r DEBUG
+      - name: Use the real Qualcomm display driver (sweet)
+        run: |
+          # ABL blanks the panel when jumping to a non-Android image on this
+          # handset, so SimpleFbDxe (draw-only) leaves the screen dead. Switch
+          # to the binary DisplayDxe, which re-initializes the whole panel
+          # path from the device tree (the fdf already wires it under this
+          # same flag, together with CPRDxe).
+          python3 - <<'EOF'
+          import re
+          p = 'Mu-Silicium/Platforms/Xiaomi/sweet_k6aPkg/sweet_k6a.dsc'
+          s = open(p).read()
+          if re.search(r'^\s*USE_CUSTOM_DISPLAY_DRIVER\s*=', s, re.M):
+              s = re.sub(r'^(\s*USE_CUSTOM_DISPLAY_DRIVER\s*=\s*)\S+.*$', r'\g<1>1', s, flags=re.M)
+              print('USE_CUSTOM_DISPLAY_DRIVER set to 1 (replaced)')
+          else:
+              s = s.replace('PLATFORM_NAME', 'USE_CUSTOM_DISPLAY_DRIVER      = 1\n  PLATFORM_NAME', 1)
+              print('USE_CUSTOM_DISPLAY_DRIVER = 1 inserted')
+          open(p, 'w').write(s)
+          EOF
+      - name: Disable the APSS watchdog in BootShim (sweet)
+        run: |
+          python3 - <<'EOF'
+          p = 'Mu-Silicium/BootShim/BootShim.S'
+          s = open(p).read()
+          i = s.index('_Start:')
+          j = s.index('\n', i) + 1
+          ins = ('  /* HACKIOS sweet: ABL arms the APSS watchdog; a UEFI boot never pets\n'
+                 '     it and the phone resets about 10 s in. Disable it first:\n'
+                 '     WDT0_EN (+0x08) = 0, layout from the pinned OEM watchdog_v2.c\n'
+                 '     wdog_disable(). */\n'
+                 '  ldr   x17, =0x17C10000\n'
+                 '  str   wzr, [x17, #8]\n'
+                 '  dsb   sy\n')
+          if '0x17C10000' not in s:
+              s = s[:j] + ins + s[j:]
+              open(p, 'w').write(s)
+              print('BootShim patched: APSS watchdog disable inserted at _Start')
+          else:
+              print('BootShim already patched')
+          EOF
+      - name: Build the XNU loader
+        run: |
+          bash xnuloader/build.sh
+          cp xnuloader/loader.efi artifacts-loader.efi
+      - name: Assemble the sweet phone boot image
+        run: |
+          # BootShim copies the UEFI FD to FD_BASE and the XNUP container to
+          # PAYLOAD_BASE. Both addresses are inside the DRAM regions the
+          # handset's own kernel reports (/proc/iomem): FD at 0x9A000000
+          # (region 0x97f17000-0x9e3fffff, 64 MiB clear of the DFPS/splash
+          # areas the OEM reserves at 0x9c000000/0x9d700000), payload at
+          # 0x81000000 (region 0x80000000-0x856fffff). The upstream map's
+          # 0x9FC00000 sits in the hole between the two RAM regions: the
+          # shim's copy there aborts the bus and the phone resets -- proven
+          # by RAM probes through the dev recovery (/dev/mem).
+          make -C Mu-Silicium/BootShim REQUIRES_KERNEL_HEADER=1 FD_BASE=0x9A000000 FD_SIZE=0x300000 \
+            CFLAGS='--target=aarch64-linux-gnu -DPAYLOAD_BASE=0x81000000'
+          DTB=Mu-Silicium/Resources/DTBs/sweet_k6a.dtb
+          if [ ! -f "$DTB" ]; then
+            echo 'sweet_k6a.dtb not found; listing DTBs and using an empty DTB:'
+            ls Mu-Silicium/Resources/DTBs/ || true
+            : > /tmp/empty.dtb
+            DTB=/tmp/empty.dtb
+          fi
+          python3 xnuloader/mkpayload.py -o payload.bin loader.efi=artifacts-loader.efi --usb
+          FD_BASE=0x9A000000 FD_SIZE=0x300000 PAYLOAD_BASE=0x81000000 \
+          UEFI_FD=Mu-Silicium/Build/sweet_k6aPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd \
+          DTB="$DTB" \
+          python3 mkxnuimg.py -p payload.bin -o sweet-boot.img
+          sha256sum sweet-boot.img payload.bin
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          find Mu-Silicium/Build -type f -iname '*BootShim*' -exec cp {} artifacts/ \; || true
+          cp Mu-Silicium/Build/sweet_k6aPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd artifacts/SILICIUM_UEFI-RELEASE.fd 2>/dev/null || true
+          cp Mu-Silicium/Build/sweet_k6aPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd artifacts/SILICIUM_UEFI-DEBUG.fd 2>/dev/null || true
+          cp artifacts-loader.efi artifacts/ 2>/dev/null || true
+          cp sweet-boot.img payload.bin artifacts/ 2>/dev/null || true
+          ls -la artifacts
+          sha256sum artifacts/* > artifacts/SHA256SUMS || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sweet-uefi
+          path: artifacts/

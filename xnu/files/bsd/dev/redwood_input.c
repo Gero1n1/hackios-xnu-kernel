@@ -224,4 +224,7 @@ redwood_input_init(void)
 	redwood_adreno_init();
 	redwood_wifi_init();
 	redwood_adsp_init();
+	/* thermal=1 enables bounded sampling: QEMU gets synthetic data without MMIO;
+	 * sweet may read TSENS only after profile and Device Tree resource checks. */
+	redwood_thermal_init();
 }

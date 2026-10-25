@@ -12,6 +12,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <sys/hackios_platform.h>
 #include <sys/redwood_input.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
@@ -42,6 +43,7 @@ static int battery_soc_percent = -1, battery_voltage_mv = -1, battery_current_ma
 static int battery_temperature_c = -273, battery_present, battery_charger_present;
 static int battery_charging, battery_soc_estimated, battery_charger_action = -1;
 static uint64_t battery_updates, battery_failures;
+static int battery_emulated;
 
 /* for others in the kernel (the flashlight's thermal guard): -273 while it is not known */
 int
@@ -69,6 +71,8 @@ SYSCTL_INT(_kern_redwood, OID_AUTO, battery_soc_estimated, CTLFLAG_RD | CTLFLAG_
     &battery_soc_estimated, 0, "1 only when SOC had to be estimated from voltage");
 SYSCTL_INT(_kern_redwood, OID_AUTO, battery_charger_action, CTLFLAG_RD | CTLFLAG_LOCKED,
     &battery_charger_action, 0, "last Qualcomm charger action, for diagnostics");
+SYSCTL_INT(_kern_redwood, OID_AUTO, battery_emulated, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &battery_emulated, 0, "1 when the readings are QEMU's synthetic charger, not a phone fuel gauge");
 
 static bool
 battery_snapshot(struct loader_battery *out)
@@ -172,6 +176,69 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 }
 
+/*
+ * QEMU has no PMIC, fuel gauge, or USB charger. With battery=1 on the qemu-virt profile this
+ * publishes a synthetic pack on a charger: 50% at the start, rising to 100%, then "full". The
+ * values feed the same RedwoodBattery power source that the phone's DSP readings feed, and
+ * kern.redwood.battery_emulated says that they are emulated.
+ */
+static void
+battery_qemu_report(int percent_hundredths, bool full)
+{
+	struct redwood_battery_state b;
+
+	bzero(&b, sizeof(b));
+	b.size = sizeof(b);
+	b.percent_hundredths = percent_hundredths;
+	b.voltage_uv = full ? 4200000 : 3950000 + percent_hundredths * 25;
+	b.current_ua = full ? 0 : 1500000;
+	b.temperature_hundredths = 3000;
+	b.present = 1;
+	b.external = 1;
+	b.status = full ? 4 : 1;                /* POWER_SUPPLY_STATUS_FULL : CHARGING */
+	b.charge_uah = 2500000 + (percent_hundredths - 5000) * 1000;
+	b.full_uah = 5000000;
+	b.design_uah = 5020000;
+	b.cycles = 42;
+	b.usb_type = 2;                         /* POWER_SUPPLY_USB_TYPE_DCP */
+	b.usb_voltage_uv = 5000000;
+	b.usb_current_ua = 2000000;
+
+	battery_soc_percent = percent_hundredths / 100;
+	battery_voltage_mv = b.voltage_uv / 1000;
+	battery_current_ma = b.current_ua / 1000;
+	battery_temperature_c = 30;
+	battery_present = 1;
+	battery_charger_present = 1;
+	battery_charging = b.status == 1;
+	battery_soc_estimated = 0;
+	battery_charger_action = b.status;
+	battery_full_uah = b.full_uah;
+	battery_design_uah = b.design_uah;
+	battery_cycles = b.cycles;
+	battery_emulated = 1;
+	battery_updates++;
+	RedwoodBatteryReport(&b, sizeof(b));
+}
+
+static void
+battery_qemu_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	int percent = 5000;                     /* hundredths: 50% */
+
+	/* IOKit's registry and powerd need a moment before a power source can be published. */
+	delay_for_interval(20000, NSEC_PER_MSEC);
+	for (;;) {
+		bool full = percent >= 10000;
+
+		battery_qemu_report(percent, full);
+		if (!full) {
+			percent += 25;          /* 0.25% every 5 s: full in about 17 minutes */
+		}
+		delay_for_interval(5000, NSEC_PER_MSEC);
+	}
+}
+
 void
 redwood_battery_init(void)
 {
@@ -181,6 +248,15 @@ redwood_battery_init(void)
 	thread_t thread;
 
 	if (!PE_parse_boot_argn("battery", &enabled, sizeof(enabled)) || !enabled) return;
+	if (hackios_platform_is("qemu-virt")) {
+		if (kernel_thread_start(battery_qemu_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+			printf("battery: QEMU synthetic charger (50%%, charging; battery_emulated=1)\n");
+		} else {
+			printf("battery: could not start the QEMU synthetic charger\n");
+		}
+		return;
+	}
 	if (!PE_parse_boot_argn("battery_shared_pa", &shared_pa, sizeof(shared_pa)) || shared_pa == 0) {
 		printf("battery: xnuloader did not provide battery_shared_pa\n");
 		return;
