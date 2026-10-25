@@ -37,19 +37,24 @@ jobs:
           ./scripts/config --file out/.config -e DEVMEM -d STRICT_DEVMEM -e PROC_KCORE
           make O=out ARCH=arm64 olddefconfig
           grep -E 'CONFIG_DEVMEM|CONFIG_STRICT_DEVMEM|CONFIG_PROC_KCORE' out/.config
-      - name: Build the kernel (clang, gcc fallback)
+      - name: Build the kernel and DTBs (clang, gcc fallback)
         run: |
           cd kernel
           make O=out ARCH=arm64 -j"$(nproc)" \
             CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
-            CROSS_COMPILE=aarch64-linux-gnu- Image.gz || \
-          make O=out ARCH=arm64 -j"$(nproc)" CROSS_COMPILE=aarch64-linux-gnu- Image.gz
+            CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs || \
+          make O=out ARCH=arm64 -j"$(nproc)" CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs
           ls -la out/arch/arm64/boot/Image.gz
+          find out/arch/arm64/boot/dts -name '*sweet*.dtb' -o -name '*sdmmagpie*.dtb' | tee dtbs.txt || true
       - name: Repack the recovery with the new kernel
         run: |
+          DTB=""
+          if [ -s kernel/dtbs.txt ]; then
+            DTB="--dtb $(head -1 kernel/dtbs.txt)"
+          fi
           python3 tools/devrecovery/repack-recovery.py recovery.img \
-            kernel/out/arch/arm64/boot/Image.gz sweet-devrecovery.img
+            kernel/out/arch/arm64/boot/Image.gz sweet-devrecovery.img $DTB
           sha256sum sweet-devrecovery.img
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

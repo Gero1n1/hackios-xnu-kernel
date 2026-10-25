@@ -1,11 +1,11 @@
 """Repack the OrangeFox recovery boot image with a freshly built kernel.
 
 Keeps the original ramdisk, kernel load addresses, cmdline and page size;
-the device tree travels with the kernel (Image.gz-dtb), so the original
-kernel's DTB bytes are carried over to the new one, wherever they live
-(inside or after the gzip stream).
+the device tree travels with the kernel (Image.gz-dtb). By default the
+original kernel's DTB bytes are carried over; pass --dtb <file> to use the
+new kernel's own DTB instead (the right choice when the kernel changes).
 
-usage: repack-recovery.py <original-recovery.img> <new-Image.gz> <out.img>
+usage: repack-recovery.py <original-recovery.img> <new-Image.gz> <out.img> [--dtb <file>]
 """
 import gzip
 import hashlib
@@ -13,7 +13,13 @@ import struct
 import sys
 import zlib
 
-ORIG, NEWKERNEL, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
+args = sys.argv[1:]
+DTB_FILE = None
+if "--dtb" in args:
+    i = args.index("--dtb")
+    DTB_FILE = args[i + 1]
+    del args[i:i + 2]
+ORIG, NEWKERNEL, OUT = args
 
 img = open(ORIG, "rb").read()
 assert img[:8] == b"ANDROID!", img[:8]
@@ -30,8 +36,13 @@ ramdisk = img[off:off + ramdisk_size]; off += pages(ramdisk_size) * page_size
 d = zlib.decompressobj(16 + zlib.MAX_WBITS)
 old_image = d.decompress(old_kernel)
 dtb_magic = b"\xd0\x0d\xfe\xed"
-if d.unused_data:
-    dtb = d.unused_data
+external_dtb = d.unused_data
+if DTB_FILE:
+    dtb = open(DTB_FILE, "rb").read()
+    assert dtb[:4] == dtb_magic, DTB_FILE
+    print(f"dtb from --dtb: {len(dtb)} bytes")
+elif external_dtb:
+    dtb = external_dtb
     print(f"dtb after the gzip stream: {len(dtb)} bytes")
 elif dtb_magic in old_image:
     i = old_image.index(dtb_magic)
@@ -42,8 +53,9 @@ else:
 
 new_kern = open(NEWKERNEL, "rb").read()
 if new_kern[:2] == b"\x1f\x8b" and dtb_magic not in new_kern:
-    # New kernel is gzipped: keep the dtb wherever the original kept it.
-    if d.unused_data:
+    # New kernel is gzipped: keep the dtb wherever the original kept it,
+    # or append the --dtb file after the stream.
+    if external_dtb or DTB_FILE:
         new_kernel = new_kern + dtb
     else:
         new_image = gzip.decompress(new_kern)
