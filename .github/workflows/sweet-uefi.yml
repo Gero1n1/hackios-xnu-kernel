@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [sweet-port]
-    paths: ['uefi/**', '.github/workflows/sweet-uefi.yml']
+    paths: ['uefi/**', 'xnuloader/**', 'mkxnuimg.py', '.github/workflows/sweet-uefi.yml']
 permissions:
   contents: read
 jobs:
