@@ -20,8 +20,10 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu cpio mkbootimg python3 wget unzip
       - name: Clone the working shim source (MIT)
         run: |
-          git clone --depth 1 https://github.com/dipa-studio/ios-sweet.git dipa
-          git -C dipa checkout -q "$DIPA"
+          git init dipa
+          git -C dipa remote add origin https://github.com/dipa-studio/ios-sweet.git
+          git -C dipa fetch --depth 1 origin "$DIPA"
+          git -C dipa checkout -q FETCH_HEAD
           git -C dipa log -1 --oneline
       - name: Extract the device DTB from the public OrangeFox recovery
         run: |
