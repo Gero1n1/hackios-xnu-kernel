@@ -40,8 +40,8 @@ jobs:
           dtb = d.unused_data
           assert dtb[:4] == b"\xd0\x0d\xfe\xed"
           import os
-          os.makedirs("dtb/boot_unpacked", exist_ok=True)
-          open("dtb/boot_unpacked/dtb", "wb").write(dtb)
+          os.makedirs("dipa/dtb/boot_unpacked", exist_ok=True)
+          open("dipa/dtb/boot_unpacked/dtb", "wb").write(dtb)
           print("dtb:", len(dtb), "bytes")
           EOF
       - name: "Build the shim (diagnostics ramdisk, no payload)"
