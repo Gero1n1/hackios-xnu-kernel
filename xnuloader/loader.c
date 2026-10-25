@@ -15,7 +15,7 @@
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
 
-#define PAYLOAD_BASE        0xF0000000ULL
+#define PAYLOAD_BASE        0x81000000ULL
 #define PAYLOAD_MAGIC       0x50554E58u /* "XNUP" */
 
 struct payload_header { uint32_t magic; uint32_t size; };
@@ -3988,6 +3988,20 @@ efi_main(efi_handle image, efi_system_table *st)
 	if (EFI_ERROR(BS->locate_protocol(&gop_guid, NULL, (void **)&GOP)) || GOP->mode == NULL ||
 	    GOP->mode->info == NULL || GOP->mode->fb_base == 0) {
 		GOP = NULL;                     /* no display (QEMU without -device ramfb) */
+		/* On a real phone the panel keeps scanning the display the
+		 * bootloader lit (the fastboot logo) even when this UEFI never
+		 * publishes GOP. Draw straight into the SoC map's Display Reserved
+		 * region; if the live scanout uses another stride the text is
+		 * skewed but visible, which is the point. QEMU (an ARM-implemented
+		 * core) must keep its own ramfb path instead. */
+		uint64_t midr = READ_SYSREG(MIDR_EL1);
+		if (((midr >> 24) & 0xff) != 0x41) {
+			SCREEN.base = 0x9C000000;
+			SCREEN.width = 1080;
+			SCREEN.height = 2400;
+			SCREEN.stride = 1080 * 4;
+			print("no GOP: drawing into the display reserved region\n");
+		}
 	} else {
 		SCREEN.base = GOP->mode->fb_base;
 		SCREEN.width = GOP->mode->info->width;
@@ -4019,6 +4033,16 @@ efi_main(efi_handle image, efi_system_table *st)
 	wdt_arm();
 
 	int have_payload = parse_payload(&pi, 0);
+	/* HACKIOS sweet bring-up experiment (remove after the phone channel
+	 * works): checkpoint 777 parks the loader here forever. Black screen
+	 * that never reboots means this point is reached; the ~10 s warm
+	 * reset means it is not. */
+	if (have_payload && pi.checkpoint == 777) {
+		print("HANG1: loader reached its payload parse\n");
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
 	if (have_payload && pi.usb_mode && usb_start()) {
 		flush_log();
 		usb_command_loop();

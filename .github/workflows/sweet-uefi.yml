@@ -70,10 +70,12 @@ jobs:
       - name: Assemble the sweet phone boot image
         run: |
           # BootShim copies the UEFI FD to FD_BASE and the XNUP container to
-          # PAYLOAD_BASE (sweet_k6a map: FD 0x9FC00000+0x300000; payload in the
-          # high conventional RAM window redwood also uses).
+          # PAYLOAD_BASE. sweet_k6a map: FD 0x9FC00000+0x300000; payload in the
+          # map's reserved "Kernel" region (0x80000000+0x5600000) at 0x81000000,
+          # whose 64 MiB window ends at 0x85000000 -- 0xF0000000 (redwood's
+          # choice) sits in this handset's low-DRAM hole and aborts the bus.
           make -C Mu-Silicium/BootShim REQUIRES_KERNEL_HEADER=1 FD_BASE=0x9FC00000 FD_SIZE=0x300000 \
-            CFLAGS='--target=aarch64-linux-gnu -DPAYLOAD_BASE=0xF0000000'
+            CFLAGS='--target=aarch64-linux-gnu -DPAYLOAD_BASE=0x81000000'
           DTB=Mu-Silicium/Resources/DTBs/sweet_k6a.dtb
           if [ ! -f "$DTB" ]; then
             echo 'sweet_k6a.dtb not found; listing DTBs and using an empty DTB:'
@@ -82,7 +84,7 @@ jobs:
             DTB=/tmp/empty.dtb
           fi
           python3 xnuloader/mkpayload.py -o payload.bin loader.efi=artifacts-loader.efi --usb
-          FD_BASE=0x9FC00000 FD_SIZE=0x300000 PAYLOAD_BASE=0xF0000000 \
+          FD_BASE=0x9FC00000 FD_SIZE=0x300000 PAYLOAD_BASE=0x81000000 \
           UEFI_FD=Mu-Silicium/Build/sweet_k6aPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd \
           DTB="$DTB" \
           python3 mkxnuimg.py -p payload.bin -o sweet-boot.img
