@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      DIPA: fdad0de
+      DIPA: fdad0de8dc0e75c5ea84762adc03f7232dc91f19
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install build dependencies
