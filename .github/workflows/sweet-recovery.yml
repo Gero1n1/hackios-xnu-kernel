@@ -40,6 +40,10 @@ jobs:
       - name: Build the kernel and DTBs (clang, gcc fallback)
         run: |
           cd kernel
+          # merge_config drops a .config and include/config into the source
+          # tree, and the O= build refuses a dirty source ("run mrproper").
+          rm -f .config
+          rm -rf include/config include/generated
           make O=out ARCH=arm64 -j"$(nproc)" \
             CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
